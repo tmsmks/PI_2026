@@ -1,0 +1,40 @@
+country_code,year,area_type,reliability_pct,region_code,region
+KEN,2018,urb,64.0,AFR,Africa
+HTI,2016,rur,30.0,AMR,Americas
+BGD,2017,totl,20.0,SEAR,South-East Asia
+SLE,2018,urb,63.0,AFR,Africa
+ZWE,2015,urb,50.0,AFR,Africa
+NPL,2021,totl,56.0,SEAR,South-East Asia
+NER,2015,rur,15.0,AFR,Africa
+LBR,2018,rur,85.0,AFR,Africa
+KEN,2018,totl,54.0,AFR,Africa
+BGD,2017,rur,18.0,SEAR,South-East Asia
+HTI,2016,totl,33.0,AMR,Americas
+SEN,2019,rur,3.0,AFR,Africa
+ETH,2016,rur,20.0,AFR,Africa
+ETH,2016,urb,28.0,AFR,Africa
+BGD,2017,urb,52.0,SEAR,South-East Asia
+NPL,2021,urb,60.0,SEAR,South-East Asia
+BOL,2019,totl,95.0,AMR,Americas
+LKA,2017,rur,90.0,SEAR,South-East Asia
+TZA,2016,rur,60.0,AFR,Africa
+LBR,2018,urb,76.0,AFR,Africa
+LKA,2017,totl,91.0,SEAR,South-East Asia
+SEN,2019,totl,45.0,AFR,Africa
+SEN,2019,urb,53.0,AFR,Africa
+TZA,2016,urb,70.0,AFR,Africa
+LBR,2018,totl,81.0,AFR,Africa
+SLE,2018,totl,55.0,AFR,Africa
+ZWE,2015,totl,48.0,AFR,Africa
+KEN,2018,rur,50.0,AFR,Africa
+LKA,2017,urb,96.0,SEAR,South-East Asia
+HTI,2016,urb,44.0,AMR,Americas
+NPL,2021,rur,53.0,SEAR,South-East Asia
+HND,2019,totl,89.0,AMR,Americas
+TLS,2015,totl,23.0,SEAR,South-East Asia
+NER,2015,urb,56.0,AFR,Africa
+SLE,2018,rur,51.0,AFR,Africa
+ZWE,2015,rur,48.0,AFR,Africa
+NER,2015,totl,19.0,AFR,Africa
+TZA,2016,totl,63.0,AFR,Africa
+ETH,2016,totl,23.0,AFR,Africa

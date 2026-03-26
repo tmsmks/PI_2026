@@ -1,0 +1,191 @@
+Contexte du projet :
+
+Je développe un projet de data science / machine learning dont l’objectif est de prédire les coupures d’électricité dans des hôpitaux.
+
+Le modèle doit être capable de :
+- Prédire si une coupure va se produire
+- Estimer quand elle va se produire
+- Identifier les causes probables
+- Estimer la durée de la coupure
+
+
+========================================
+SOURCES DE DONNÉES DISPONIBLES
+========================================
+
+1. APIs OMS (Organisation Mondiale de la Santé)
+
+Ces APIs fournissent des données globales sur la fiabilité de l’électricité dans les hôpitaux.
+
+- Fiabilité de l'électricité :
+https://ghoapi.azureedge.net/api/HCF_REL_ELECTRICITY
+→ Donne le % d'hôpitaux par pays ayant une électricité stable (sans coupure > 2h)
+
+- Accès à l’électricité :
+https://ghoapi.azureedge.net/api/HCF_ANY_ELECTRICITY
+→ Compare l'accès théorique au réseau vs la réalité (pannes fréquentes)
+
+- Source d'énergie primaire :
+https://ghoapi.azureedge.net/api/HCF_PRIMARY_SOURCE
+→ Indique si l’hôpital dépend du réseau, du diesel ou du solaire
+
+- Équipements lourds (scanner CT) :
+https://ghoapi.azureedge.net/api/RAD_CT
+→ Permet d’estimer les besoins énergétiques élevés
+
+- Métadonnées pays :
+https://ghoapi.azureedge.net/api/Dimension/COUNTRY/DimensionValues
+→ Mapping entre codes pays et noms
+
+👉 Utilisation :
+- Features macro (risque par pays)
+- Contexte structurel du réseau
+
+
+----------------------------------------
+
+2. Données météo (Open-Meteo API)
+
+https://api.open-meteo.com/v1/forecast
+
+Variables disponibles :
+- Température
+- Humidité
+- Vent
+- Précipitations
+- Pression
+- Rayonnement solaire
+
+👉 Utilisation :
+- Impact météo sur consommation
+- Production solaire
+- Stress du réseau (ex : canicule)
+
+
+----------------------------------------
+
+3. Données de consommation énergétique (time series)
+
+- Données horaires (hôpital Phoenix) :
+https://github.com/Shahid-Fakhri/Electricity-Consumption
+→ 8760 points (1 an) pour modéliser la consommation
+
+- Données haute fréquence (Ouganda - Lacor Hospital) :
+https://zenodo.org/records/7466652
+→ Données toutes les 5 minutes (réseau + solaire + générateur)
+
+- Dataset simulé (Kaggle) :
+https://www.kaggle.com/datasets/ziya07/hospital-energy-saving-system-dataset
+→ 10 000 lignes pour entraînement
+
+👉 Utilisation :
+- Base principale du modèle
+- Détection d’anomalies
+- Analyse des pics de consommation
+
+
+----------------------------------------
+
+4. Données de pannes et réseau
+
+- API EskomSePush :
+https://eskomsepush.gumroad.com/l/api?layout=profile
+→ Horaires de délestage (coupures planifiées)
+
+- Historique électricité Afrique du Sud :
+https://www.kaggle.com/datasets/sbonelondhlazi/sa-electricity-historical-data
+→ Historique des pannes et instabilité réseau
+
+👉 Utilisation :
+- Création de la variable cible (coupure)
+- Pattern des pannes
+- Fréquence et durée
+
+
+----------------------------------------
+
+5. Benchmarks énergétiques
+
+- US Department of Energy :
+https://data.openei.org/submissions/157
+→ Consommation standard par m² (référence)
+
+- NHS Angleterre (ERIC) :
+https://digital.nhs.uk/data-and-information/publications/statistical/estates-returns-information-collection
+→ Données réelles de consommation hospitalière
+
+👉 Utilisation :
+- Validation des prédictions
+- Détection de surconsommation
+
+
+========================================
+OBJECTIF TECHNIQUE
+========================================
+
+Construire un pipeline complet :
+
+1. DATA ENGINEERING
+- Collecter les données via APIs (OMS, météo)
+- Télécharger et charger les CSV
+- Nettoyer les données (valeurs manquantes, formats)
+- Synchroniser les timestamps
+- Fusionner les datasets (temps + pays)
+
+2. FEATURE ENGINEERING
+Créer des variables :
+- Moyennes glissantes (rolling mean)
+- Variations de consommation
+- Pics de charge
+- Indicateurs météo dérivés
+- Encodage pays et énergie
+- Indicateurs de stress réseau
+
+3. MODÉLISATION
+
+Formulations :
+
+Classification :
+- Y = coupure (0/1)
+
+Régression :
+- durée de coupure
+- temps avant prochaine coupure
+
+Modèles à tester :
+- Random Forest
+- XGBoost
+- LSTM (séries temporelles)
+- Prophet (baseline)
+
+4. OUTPUT ATTENDU
+
+Le modèle doit retourner :
+- Probabilité de coupure
+- Temps estimé avant coupure
+- Durée estimée
+- Explication (feature importance)
+
+
+========================================
+CE QUE JE VEUX QUE TU FASSES
+========================================
+
+1. Analyser toutes les sources de données
+2. Identifier les données les plus pertinentes à garder
+3. Proposer une stratégie de fusion des datasets
+4. Concevoir une architecture de pipeline complète
+5. Générer :
+   - structure de projet (dossiers)
+   - scripts Python (ingestion, preprocessing, training)
+6. Proposer les meilleures features
+7. Implémenter un modèle baseline simple
+
+
+========================================
+CONTRAINTES
+========================================
+
+- Python 
+- Code propre, modulaire, scalable
+- Explications pédagogiques
