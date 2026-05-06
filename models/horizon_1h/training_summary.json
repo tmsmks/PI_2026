@@ -1,0 +1,121 @@
+{
+  "horizon": 1,
+  "target_col": "outage_in_1h",
+  "winner": "XGBoost",
+  "winner_params": {
+    "colsample_bytree": 0.8,
+    "learning_rate": 0.1,
+    "max_depth": 5,
+    "n_estimators": 300,
+    "scale_pos_weight": 15,
+    "subsample": 0.8
+  },
+  "n_cv_folds": 5,
+  "n_features": 47,
+  "feature_names": [
+    "solar_pv_kw",
+    "total_load_kw",
+    "sterilization_kw",
+    "base_load_kw",
+    "temperature_2m",
+    "relative_humidity_2m",
+    "wind_speed_10m",
+    "wind_gusts_10m",
+    "precipitation",
+    "surface_pressure",
+    "shortwave_radiation",
+    "cape",
+    "weathercode",
+    "hour",
+    "day_of_week",
+    "month",
+    "is_weekend",
+    "hour_sin",
+    "hour_cos",
+    "month_sin",
+    "month_cos",
+    "rainy_season",
+    "dry_season",
+    "peak_demand_hours",
+    "load_rolling_6h",
+    "load_rolling_24h",
+    "load_std_24h",
+    "load_diff_1h",
+    "load_diff_24h",
+    "load_pct_change_1h",
+    "peak_ratio",
+    "solar_ratio",
+    "base_load_ratio",
+    "temp_humidity_interaction",
+    "wind_precipitation_interaction",
+    "solar_available",
+    "heat_stress",
+    "precip_cumul_6h",
+    "precip_cumul_24h",
+    "precip_cumul_48h",
+    "dangerous_gusts",
+    "gust_load_interaction",
+    "thunderstorm_risk",
+    "storm_risk",
+    "wmo_storm",
+    "pressure_drop_3h",
+    "night_no_solar"
+  ],
+  "models_compared": [
+    "RandomForest",
+    "XGBoost",
+    "LightGBM"
+  ],
+  "test_metrics_raw": {
+    "accuracy": 0.9486,
+    "precision": 0.7419,
+    "recall": 0.697,
+    "f1": 0.7188,
+    "roc_auc": 0.9536,
+    "brier": 0.0407
+  },
+  "test_metrics_calibrated": {
+    "accuracy": 0.9207,
+    "precision": 0.9333,
+    "recall": 0.1697,
+    "f1": 0.2872,
+    "roc_auc": 0.9038,
+    "brier": 0.0575
+  },
+  "comparison": {
+    "RandomForest": {
+      "best_params": {
+        "class_weight": {
+          "0": 1,
+          "1": 22
+        },
+        "max_depth": 12,
+        "min_samples_leaf": 8,
+        "n_estimators": 300
+      },
+      "best_f1_cv": 0.2833
+    },
+    "XGBoost": {
+      "best_params": {
+        "colsample_bytree": 0.8,
+        "learning_rate": 0.1,
+        "max_depth": 5,
+        "n_estimators": 300,
+        "scale_pos_weight": 15,
+        "subsample": 0.8
+      },
+      "best_f1_cv": 0.2931
+    },
+    "LightGBM": {
+      "best_params": {
+        "colsample_bytree": 0.8,
+        "learning_rate": 0.05,
+        "max_depth": -1,
+        "n_estimators": 200,
+        "scale_pos_weight": 15,
+        "subsample": 0.8
+      },
+      "best_f1_cv": 0.2841
+    }
+  }
+}

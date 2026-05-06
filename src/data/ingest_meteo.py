@@ -6,6 +6,7 @@ pour chaque hôpital de référence.
 """
 
 import logging
+from datetime import date, timedelta
 
 import pandas as pd
 import requests
@@ -43,19 +44,33 @@ def fetch_meteo_archive(
     return df
 
 
-def run() -> None:
-    """Récupère la météo 2022 pour correspondre au dataset Lacor."""
+def run(
+    start_date: str = "2022-01-01",
+    end_date: str = "2022-12-31",
+) -> None:
+    """Récupère la météo historique sur une plage de dates."""
     for name, coords in HOSPITAL_LOCATIONS.items():
         df = fetch_meteo_archive(
             lat=coords["lat"],
             lon=coords["lon"],
-            start_date="2022-01-01",
-            end_date="2022-12-31",
+            start_date=start_date,
+            end_date=end_date,
         )
         df["hospital"] = name
         save_csv(df, RAW_DIR / f"meteo_{name}.csv")
 
-    logger.info("Ingestion météo terminée.")
+    logger.info(
+        "Ingestion météo terminée [%s → %s].",
+        start_date,
+        end_date,
+    )
+
+
+def run_live(window_days: int = 30) -> None:
+    """Récupère une fenêtre glissante récente (quasi temps réel)."""
+    end = date.today()
+    start = end - timedelta(days=window_days)
+    run(start_date=start.isoformat(), end_date=end.isoformat())
 
 
 if __name__ == "__main__":

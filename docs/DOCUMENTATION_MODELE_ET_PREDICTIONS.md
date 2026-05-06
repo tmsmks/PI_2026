@@ -1,9 +1,13 @@
 # Documentation du modèle et des calculs de prédiction
 
+> **Mise à jour 2026-05 (important)**  
+> Le pipeline actuel est **multi-hôpitaux** et le modèle gagnant de la run courante est **LightGBM** (voir `models/training_summary.json`).  
+> Les sections historiques conservées ci-dessous doivent être lues comme contexte méthodologique, pas comme état exact des derniers artefacts.
+
 ## Table des matières
 
 1. [Vue d'ensemble du pipeline de modélisation](#1-vue-densemble-du-pipeline-de-modélisation)
-2. [Feature engineering — les 46 variables](#2-feature-engineering--les-46-variables)
+2. [Feature engineering — jeu multi-hôpitaux](#2-feature-engineering--jeu-multi-hôpitaux)
 3. [Préparation des données d'entraînement](#3-préparation-des-données-dentraînement)
 4. [Comparaison multi-modèles (RF / XGBoost / LightGBM)](#4-comparaison-multi-modèles-rf--xgboost--lightgbm)
 5. [Validation croisée temporelle (TimeSeriesSplit)](#5-validation-croisée-temporelle-timeseriessplit)
@@ -25,10 +29,10 @@
 Le pipeline transforme les données brutes en prédictions de coupure en 7 étapes :
 
 ```
-Données brutes      Features        GridSearch       Meilleur      Calibration    SHAP         Inférence
-──────────────      ────────        ──────────       ────────      ───────────    ────         ─────────
-8 760 heures  ──►   46 cols   ──►   RF / XGB   ──►  LightGBM ──► Isotonique ──► TreeExp ──►  P(coupure)
-17 colonnes         31 actives      / LightGBM       300 arbres    3 folds        1752 obs     ∈ [0, 1]
+Données brutes            Features                 GridSearch           Meilleur      Calibration    SHAP
+──────────────            ────────                 ──────────           ────────      ───────────    ────
+multi-hôpitaux  ──►  `hospital_merged.csv`  ──►  RF / XGB / LGBM  ──►  LightGBM ──► Isotonique ──► TreeExp
+                       `features_dataset.csv`       TimeSeriesSplit       (run courante)  (3 folds)    (échantillonné)
                                     5 folds CV
 ```
 
@@ -39,14 +43,15 @@ Données brutes      Features        GridSearch       Meilleur      Calibration 
 | Feature engineering | `src/features/build_features.py` | `data/processed/hospital_merged.csv` | `data/features/features_dataset.csv` |
 | Entraînement | `src/models/train_baseline.py` | `data/features/features_dataset.csv` | `models/calibrated_rf.joblib` + `models/baseline_rf.joblib` |
 | SHAP | `src/models/train_baseline.py` | Modèle + test set | `models/shap_explainer.joblib` + `models/shap_values.npz` |
-| Prédiction (API) | `src/models/predict.py` | Modèle + features | Probabilité + explications |
+| Prédiction (app) | `app.py` | Modèle + features | Probabilité + explications |
 | Interface | `app.py` | Modèle calibré + SHAP explainer + profil hôpital | Prédiction ajustée + waterfall SHAP |
 
 ---
 
-## 2. Feature engineering — les 46 variables
+## 2. Feature engineering — jeu multi-hôpitaux
 
-Le dataset final contient **46 colonnes** : 1 datetime, 1 variable cible (`is_outage`), et **44 features** numériques réparties en 5 catégories. Parmi celles-ci, **31 sont utilisées pour l'entraînement** (15 exclues : 8 leakage + 1 datetime + 1 cible + 5 features constantes à importance 0).
+Le dataset final est désormais **multi-hôpitaux** (volume et nombre de colonnes variables selon les sources disponibles).  
+La sélection des features d'entraînement est pilotée par `COLS_TO_DROP` dans `src/models/train_baseline.py`, puis `X = df.drop(columns=drop).select_dtypes(include=[np.number])`.
 
 ### 2.1. Features temporelles (7 variables)
 
@@ -132,7 +137,7 @@ Ces features capturent le niveau de charge, sa dynamique et sa variabilité.
 | `loadshed_max_stage` | Eskom | Maximum du stage | 6 |
 | `loadshed_pct_active` | Eskom | `mean(stage > 0)` | ~0.65 |
 
-> **Note** : Ces 5 features + `storm_risk` (section 2.4) sont constantes sur la série mono-hôpital → importance **0.0%**. Elles sont **exclues de l'entraînement** via `COLS_TO_DROP` mais conservées dans le dataset pour de futurs modèles multi-pays.
+> **Note** : dans la version courante, certaines colonnes historiques ont été retirées de `COLS_TO_DROP` et remplacées par des exclusions de colonnes météo brutes redondantes (`cloud_cover`, `visibility`, `et0_fao_evapotranspiration`).
 
 ---
 
@@ -162,7 +167,7 @@ COLS_TO_DROP = [
 ]
 ```
 
-**Features utilisées pour l'entraînement : 31 variables** (46 − 1 datetime − 1 cible − 7 leakage − 6 constantes).
+**Features utilisées pour l'entraînement : calculées dynamiquement** selon les colonnes présentes après ingestion/fusion multi-sources.
 
 ### 3.2. Split temporel (pas de shuffle)
 
@@ -233,28 +238,28 @@ Trois algorithmes de type ensemble d'arbres sont comparés via **GridSearchCV** 
 | `subsample` | 0.8 |
 | `colsample_bytree` | 0.8 |
 
-### 4.3. Résultats comparatifs (test set)
+### 4.3. Résultats comparatifs (run actuelle)
 
 | Modèle | F1 (CV) | Accuracy | Precision | Recall | F1 (test) | ROC AUC | Brier |
 |---|---|---|---|---|---|---|---|
-| **LightGBM** | 0.3403 | **97.3%** | **86.0%** | **85.5%** | **85.7%** | **98.9%** | **0.018** |
-| RandomForest | 0.3352 | 93.3% | 60.2% | 84.2% | 70.2% | 97.2% | 0.071 |
-| XGBoost | 0.3404 | 91.2% | 51.8% | 86.7% | 64.9% | 96.8% | 0.069 |
+| **LightGBM** | **0.7626** | **99.82%** | 85.96% | **84.48%** | **85.22%** | **99.90%** | **0.0014** |
+| XGBoost | 0.7503 | 99.63% | 65.92% | 84.48% | 74.06% | 99.86% | 0.0031 |
+| RandomForest | 0.1235 | 99.70% | 79.47% | 68.97% | 73.85% | 99.87% | 0.0035 |
 
-**LightGBM gagne** sur presque toutes les métriques, avec un F1 de 85.7% vs 70.2% (RF) et 64.9% (XGB).
+**LightGBM gagne** sur la run actuelle (`models/training_summary.json`).
 
 ### 4.4. Meilleur modèle : LightGBM
 
 ```python
 LGBMClassifier(
     n_estimators=300,
-    max_depth=8,
-    learning_rate=0.1,
+    max_depth=-1,
+    learning_rate=0.05,
     scale_pos_weight=15,
     subsample=0.8,
     colsample_bytree=0.8,
     random_state=42,
-    n_jobs=-1,
+    n_jobs=1,
 )
 ```
 
@@ -320,12 +325,12 @@ Le modèle calibré est utilisé par l'application Streamlit.
 
 | Métrique | Score | Description |
 |----------|-------|-------------|
-| **Accuracy** | 97.3% | % de prédictions correctes |
-| **Precision** | 86.0% | Parmi les coupures prédites, % de vraies |
-| **Recall** | 85.5% | Parmi les vraies coupures, % détectées |
-| **F1-score** | 85.7% | Moyenne harmonique Precision × Recall |
-| **ROC AUC** | 98.9% | Capacité de discrimination |
-| **Brier** | 0.018 | Erreur quadratique de calibration |
+| **Accuracy** | 99.82% | % de prédictions correctes |
+| **Precision** | 85.96% | Parmi les coupures prédites, % de vraies |
+| **Recall** | 84.48% | Parmi les vraies coupures, % détectées |
+| **F1-score** | 85.22% | Moyenne harmonique Precision × Recall |
+| **ROC AUC** | 99.90% | Capacité de discrimination |
+| **Brier** | 0.0014 | Erreur quadratique de calibration |
 
 ### 7.2. Feature importance SHAP (top 15)
 
@@ -368,7 +373,7 @@ Le pipeline utilise `shap.TreeExplainer`, optimisé pour les modèles d'arbres (
 
 ```python
 explainer = shap.TreeExplainer(lightgbm_model)
-shap_values = explainer.shap_values(X_test)  # (1752, 31)
+shap_values = explainer.shap_values(X_test)  # (n_test, n_features)
 ```
 
 ### Fichiers générés
@@ -376,7 +381,7 @@ shap_values = explainer.shap_values(X_test)  # (1752, 31)
 | Fichier | Contenu | Taille |
 |---------|---------|--------|
 | `models/shap_explainer.joblib` | TreeExplainer sérialisé | ~30 Mo |
-| `models/shap_values.npz` | SHAP values du test set (1752 × 31) | ~1 Mo |
+| `models/shap_values.npz` | SHAP values du test set (taille variable) | ~1+ Mo |
 | `models/shap_feature_importance.csv` | |SHAP| moyen par feature | ~2 Ko |
 
 ### Utilisation dans l'interface
@@ -408,7 +413,7 @@ Dans l'onglet "Prédiction en temps réel" de l'interface Streamlit, le calcul s
 
 ```python
 recent = df.tail(72).copy()
-X = recent[feature_cols]                    # 72 lignes × 31 features
+X = recent[feature_cols]                    # 72 lignes × n_features
 ```
 
 ### Étape 2 : Prédiction sur chaque heure
@@ -449,7 +454,7 @@ max_proba, notes = adjust_for_hospital_profile(max_proba, hospital)
 
 ## 10. Simulation manuelle — construction d'un scénario
 
-La simulation permet à l'utilisateur de définir un scénario hypothétique et d'obtenir une prédiction. Le défi est de construire un vecteur de **31 features cohérent** à partir de quelques paramètres utilisateur.
+La simulation permet à l'utilisateur de définir un scénario hypothétique et d'obtenir une prédiction. Le défi est de construire un vecteur de **features cohérent** à partir de quelques paramètres utilisateur.
 
 ### 10.1. Paramètres utilisateur (13 entrées)
 
@@ -471,7 +476,7 @@ La simulation permet à l'utilisateur de définir un scénario hypothétique et 
 
 ### 10.2. Stratégie de construction de la ligne (`build_simulation_row`)
 
-Le problème : l'utilisateur définit 13 paramètres, mais le modèle attend **31 features**, dont des statistiques rolling (moyenne 6h, 24h, écart-type, etc.) qui n'ont pas de sens pour une seule heure simulée.
+Le problème : l'utilisateur définit 13 paramètres, mais le modèle attend un nombre de features plus élevé, dont des statistiques rolling (moyenne 6h, 24h, écart-type, etc.) qui n'ont pas de sens pour une seule heure simulée.
 
 **Solution : la ligne la plus similaire dans l'historique**
 
@@ -589,7 +594,7 @@ P_ajustée = min(0.99, P_modèle + stress_total)
 
 ### Problème
 
-Le modèle est entraîné **uniquement sur Lacor Hospital** (Ouganda, fiabilité OMS 50%). Pour prédire le risque dans un autre hôpital (NHS à 99.5% ou Dhaka à 20%), il faut ajuster.
+Le pipeline actuel est **multi-hôpitaux**, mais il reste des écarts de domaine entre sites (qualité des données, disponibilité des sources, structure du réseau local). L'ajustement par profil reste utilisé comme couche de robustesse métier dans l'application.
 
 ### Formule : `adjust_for_hospital_profile()`
 
@@ -716,7 +721,7 @@ Les scores après correction restent très bons car la consommation, le solaire 
 
 | Limite | Impact | Sévérité |
 |--------|--------|----------|
-| Entraîné sur un seul hôpital (Lacor) | Le modèle capture les patterns de Lacor, pas la généralité | Haute |
+| Hétérogénéité multi-hôpitaux | Les sites ont des distributions et qualités de données différentes | Haute |
 | Heuristique pour temps/durée | Pas de modèle dédié pour le timing et la durée | Moyenne |
 | Calibration réduit le recall | Le modèle calibré détecte moins de coupures (35.8% vs 85.5%) | Moyenne |
 
@@ -737,7 +742,7 @@ Les scores après correction restent très bons car la consommation, le solaire 
 
 | Piste | Complexité | Gain attendu |
 |-------|-----------|-------------|
-| **Multi-hôpitaux** : entraîner sur Lacor + ERIC NHS + synthétiques | Élevée | Meilleure généralisation |
+| **Domain adaptation** inter-sites (pondération, calibrations locales) | Élevée | Meilleure robustesse hors site majoritaire |
 | **Modèle de durée** : régression pour prédire la durée de coupure | Moyenne | Prédictions plus précises |
 | **Modèle séquentiel** (LSTM/Transformer) : dépendances temporelles longues | Élevée | Meilleure détection des patterns |
 | **Données externes** : pannes réseau en temps réel, calendrier fêtes | Moyenne | Features plus riches |
@@ -751,13 +756,13 @@ Les scores après correction restent très bons car la consommation, le solaire 
                                             ▼
                                 ┌───────────────────────┐
                                 │ build_simulation_row() │
-                                │ 13 params → 31 feats  │
+                                │ 13 params → N feats   │
                                 └───────────┬───────────┘
                                             │
                                             ▼
                                 ┌───────────────────────┐
                                 │ model.predict_proba()  │
-                                │ LightGBM calibré       │
+                                │ Modèle calibré courant │
                                 │ P_modèle ∈ [0, 1]     │
                                 └───────────┬───────────┘
                                             │

@@ -8,3 +8,7 @@ __pycache__/
 dist/
 build/
 .ipynb_checkpoints/
+
+# Datasets volumineux (gardés en local uniquement)
+data/features/*.csv
+data/raw/nyc_ll84/*.csv

@@ -2,73 +2,189 @@
 Script principal : exécute le pipeline complet de bout en bout.
 
 Étapes :
-  1. Ingestion des données réelles (Lacor, Phoenix, Eskom, OMS, météo)
+  1. Ingestion des données réelles (Lacor, ERIC NHS, NYC LL84, météo,
+     air quality, USGS, GDACS, GDELT, NOAA Storm, Electricity Maps,
+     prévisions Open-Meteo)
   2. Preprocessing (rééchantillonnage, nettoyage, fusion)
   3. Feature engineering
-  4. Entraînement du modèle baseline (Random Forest)
+  4. Entraînement du modèle baseline (Random Forest / XGBoost / LightGBM)
 """
 
 import logging
 import sys
+from datetime import date, datetime, timedelta
+import argparse
+from time import perf_counter
 
 from src.utils.io import setup_logging
 
 logger = logging.getLogger(__name__)
 
 
-def main():
+def _run_timed(label: str, fn, *args, **kwargs):
+    start = perf_counter()
+    fn(*args, **kwargs)
+    elapsed = perf_counter() - start
+    logger.info("  ✓ %s terminé en %.2fs", label, elapsed)
+    return elapsed
+
+
+def main(
+    mode: str = "train",
+    window_days: int = 30,
+    fast_mode: bool = False,
+    grid_scale: str = "full",
+    cv_folds: int | None = None,
+    shap_sample_size: int | None = None,
+    save_full_artifacts: bool = True,
+):
     setup_logging()
     logger.info("=" * 60)
     logger.info("  PIPELINE — Prédiction de coupures d'électricité")
-    logger.info("  Données réelles : Lacor Hospital (Ouganda, 2022)")
+    if mode == "live":
+        logger.info("  Mode LIVE : fenêtre glissante récente (%d jours)", window_days)
+    else:
+        logger.info("  Données réelles : Lacor Hospital (Ouganda, 2022)")
     logger.info("=" * 60)
 
     # ── Étape 1 : Ingestion ─────────────────────────────────────────
     logger.info("\n▶ ÉTAPE 1 : Ingestion des données")
 
+    stage_start = perf_counter()
     logger.info("  → Chargement des datasets de consommation…")
     from src.data.ingest_consumption import run as ingest_consumption
-    ingest_consumption()
-
-    logger.info("  → Chargement des données de pannes (Eskom)…")
-    from src.data.ingest_outages import run as ingest_outages
-    ingest_outages()
-
-    logger.info("  → Récupération des données OMS…")
-    try:
-        from src.data.ingest_who import run as ingest_who
-        ingest_who()
-    except Exception as e:
-        logger.warning("  ⚠ Ingestion OMS échouée : %s", e)
+    _run_timed("Ingestion consommation", ingest_consumption)
 
     logger.info("  → Récupération de la météo historique 2022…")
     try:
         from src.data.ingest_meteo import run as ingest_meteo
-        ingest_meteo()
+        if mode == "live":
+            end_d = date.today()
+            start_d = end_d - timedelta(days=window_days)
+            _run_timed(
+                "Ingestion météo",
+                ingest_meteo,
+                start_date=start_d.isoformat(),
+                end_date=end_d.isoformat(),
+            )
+        else:
+            _run_timed("Ingestion météo", ingest_meteo)
     except Exception as e:
         logger.warning("  ⚠ Ingestion météo échouée : %s", e)
 
     logger.info("  → Ingestion données ERIC NHS…")
     try:
         from src.data.ingest_eric import run as ingest_eric
-        ingest_eric()
+        _run_timed("Ingestion ERIC", ingest_eric)
     except Exception as e:
         logger.warning("  ⚠ Ingestion ERIC échouée : %s", e)
+
+    logger.info("  → Ingestion données NYC LL84…")
+    try:
+        from src.data.ingest_nyc_ll84 import run as ingest_nyc
+        _run_timed("Ingestion NYC LL84", ingest_nyc)
+    except Exception as e:
+        logger.warning("  ⚠ Ingestion NYC LL84 échouée : %s", e)
+
+    logger.info("  → Ingestion signal événementiel GDELT…")
+    try:
+        from src.data.ingest_gdelt import run as ingest_gdelt
+        year = datetime.now().year if mode == "live" else 2022
+        _run_timed("Ingestion GDELT", ingest_gdelt, year=year)
+    except Exception as e:
+        logger.warning("  ⚠ Ingestion GDELT échouée : %s", e)
+
+    logger.info("  → Ingestion NOAA Storm Events (Phoenix)…")
+    try:
+        from src.data.ingest_noaa_storm import run as ingest_noaa
+        year = datetime.now().year if mode == "live" else 2022
+        _run_timed("Ingestion NOAA", ingest_noaa, year=year)
+    except Exception as e:
+        logger.warning("  ⚠ Ingestion NOAA échouée : %s", e)
+
+    logger.info("  → Ingestion qualité de l'air (Open-Meteo Air Quality)…")
+    try:
+        from src.data.ingest_air_quality import run as ingest_air
+        if mode == "live":
+            end_d = date.today()
+            start_d = end_d - timedelta(days=window_days)
+            _run_timed(
+                "Ingestion Air Quality",
+                ingest_air,
+                year=None,
+                start_date=start_d.isoformat(),
+                end_date=end_d.isoformat(),
+            )
+        else:
+            _run_timed("Ingestion Air Quality", ingest_air, year=2022)
+    except Exception as e:
+        logger.warning("  ⚠ Ingestion Air Quality échouée : %s", e)
+
+    logger.info("  → Ingestion sismique (USGS Earthquake Catalog)…")
+    try:
+        from src.data.ingest_usgs_earthquake import run as ingest_usgs
+        if mode == "live":
+            end_dt = datetime.utcnow()
+            start_dt = end_dt - timedelta(days=window_days)
+            _run_timed("Ingestion USGS", ingest_usgs, year=None, start=start_dt, end=end_dt)
+        else:
+            _run_timed("Ingestion USGS", ingest_usgs, year=2022)
+    except Exception as e:
+        logger.warning("  ⚠ Ingestion USGS échouée : %s", e)
+
+    logger.info("  → Ingestion catastrophes naturelles (GDACS)…")
+    try:
+        from src.data.ingest_gdacs import run as ingest_gdacs
+        if mode == "live":
+            end_dt = datetime.utcnow()
+            start_dt = end_dt - timedelta(days=window_days)
+            _run_timed("Ingestion GDACS", ingest_gdacs, year=None, start=start_dt, end=end_dt)
+        else:
+            _run_timed("Ingestion GDACS", ingest_gdacs, year=2022)
+    except Exception as e:
+        logger.warning("  ⚠ Ingestion GDACS échouée : %s", e)
+
+    logger.info("  → Ingestion prévisions météo (Open-Meteo Forecast)…")
+    try:
+        from src.data.ingest_openmeteo_forecast import run as ingest_forecast
+        _run_timed("Ingestion Forecast", ingest_forecast)
+    except Exception as e:
+        logger.warning("  ⚠ Ingestion prévisions échouée : %s", e)
+
+    logger.info("  → Ingestion réseau local Electricity Maps (charge + mix)…")
+    try:
+        from src.data.ingest_electricitymaps import run as ingest_em_train, run_live as ingest_em_live
+        if mode == "live":
+            _run_timed("Ingestion Electricity Maps", ingest_em_live, window_hours=window_days * 24)
+        else:
+            _run_timed("Ingestion Electricity Maps", ingest_em_train)
+    except Exception as e:
+        logger.warning("  ⚠ Ingestion Electricity Maps échouée : %s", e)
+
+    logger.info("  ✓ Étape ingestion terminée en %.2fs", perf_counter() - stage_start)
 
     # ── Étape 2 : Preprocessing ─────────────────────────────────────
     logger.info("\n▶ ÉTAPE 2 : Preprocessing (rééchantillonnage + fusion)")
     from src.data.preprocessing import run as preprocess
-    preprocess()
+    _run_timed("Preprocessing", preprocess)
 
     # ── Étape 3 : Feature engineering ───────────────────────────────
     logger.info("\n▶ ÉTAPE 3 : Feature engineering")
     from src.features.build_features import run as build_features
-    build_features()
+    _run_timed("Feature engineering", build_features)
 
     # ── Étape 4 : Entraînement baseline ─────────────────────────────
     logger.info("\n▶ ÉTAPE 4 : Entraînement du modèle baseline")
     from src.models.train_baseline import run as train_baseline
-    train_baseline()
+    _run_timed(
+        "Entraînement",
+        train_baseline,
+        fast_mode=fast_mode,
+        grid_scale=grid_scale,
+        cv_folds=cv_folds,
+        shap_sample_size=shap_sample_size,
+        save_full_artifacts=save_full_artifacts,
+    )
 
     logger.info("\n" + "=" * 60)
     logger.info("  PIPELINE TERMINÉ AVEC SUCCÈS")
@@ -76,4 +192,54 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Pipeline prédiction coupures")
+    parser.add_argument(
+        "--mode",
+        choices=["train", "live"],
+        default="train",
+        help="train = pipeline historique 2022, live = fenêtre glissante récente",
+    )
+    parser.add_argument(
+        "--window-days",
+        type=int,
+        default=30,
+        help="Taille de la fenêtre glissante en jours (mode live).",
+    )
+    parser.add_argument(
+        "--fast",
+        action="store_true",
+        help="Active un mode rapide (CV réduit, grilles compactes, SHAP échantillonné).",
+    )
+    parser.add_argument(
+        "--grid-scale",
+        choices=["compact", "full"],
+        default="full",
+        help="Taille de grille d'hyperparamètres.",
+    )
+    parser.add_argument(
+        "--cv-folds",
+        type=int,
+        default=None,
+        help="Nombre de folds TimeSeriesSplit (override).",
+    )
+    parser.add_argument(
+        "--shap-sample-size",
+        type=int,
+        default=None,
+        help="Taille d'échantillon max pour SHAP.",
+    )
+    parser.add_argument(
+        "--no-full-artifacts",
+        action="store_true",
+        help="Ne sauvegarde pas les artefacts lourds (explainer/joblib SHAP).",
+    )
+    args = parser.parse_args()
+    main(
+        mode=args.mode,
+        window_days=args.window_days,
+        fast_mode=args.fast,
+        grid_scale=args.grid_scale,
+        cv_folds=args.cv_folds,
+        shap_sample_size=args.shap_sample_size,
+        save_full_artifacts=not args.no_full_artifacts,
+    )

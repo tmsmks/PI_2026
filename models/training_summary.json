@@ -2,33 +2,36 @@
   "winner": "LightGBM",
   "winner_params": {
     "colsample_bytree": 0.8,
-    "learning_rate": 0.1,
-    "max_depth": 8,
+    "learning_rate": 0.05,
+    "max_depth": -1,
     "n_estimators": 300,
     "scale_pos_weight": 15,
     "subsample": 0.8
   },
   "n_cv_folds": 5,
+  "grid_scale": "full",
+  "fast_mode": false,
+  "shap_sample_size": 5000,
   "models_compared": [
     "RandomForest",
     "XGBoost",
     "LightGBM"
   ],
   "test_metrics_raw": {
-    "accuracy": 0.9732,
-    "precision": 0.8598,
-    "recall": 0.8545,
-    "f1": 0.8571,
-    "roc_auc": 0.9889,
-    "brier": 0.0183
+    "accuracy": 0.9982,
+    "precision": 0.8596,
+    "recall": 0.8448,
+    "f1": 0.8522,
+    "roc_auc": 0.999,
+    "brier": 0.0014
   },
   "test_metrics_calibrated": {
-    "accuracy": 0.9389,
-    "precision": 0.9833,
-    "recall": 0.3576,
-    "f1": 0.5244,
-    "roc_auc": 0.965,
-    "brier": 0.0428
+    "accuracy": 0.9986,
+    "precision": 0.9467,
+    "recall": 0.8161,
+    "f1": 0.8765,
+    "roc_auc": 0.9996,
+    "brier": 0.0015
   },
   "comparison": {
     "RandomForest": {
@@ -39,9 +42,9 @@
         },
         "max_depth": 18,
         "min_samples_leaf": 8,
-        "n_estimators": 200
+        "n_estimators": 300
       },
-      "best_f1_cv": 0.3352
+      "best_f1_cv": 0.1235
     },
     "XGBoost": {
       "best_params": {
@@ -52,18 +55,18 @@
         "scale_pos_weight": 10,
         "subsample": 0.8
       },
-      "best_f1_cv": 0.3404
+      "best_f1_cv": 0.7503
     },
     "LightGBM": {
       "best_params": {
         "colsample_bytree": 0.8,
-        "learning_rate": 0.1,
-        "max_depth": 8,
+        "learning_rate": 0.05,
+        "max_depth": -1,
         "n_estimators": 300,
         "scale_pos_weight": 15,
         "subsample": 0.8
       },
-      "best_f1_cv": 0.3403
+      "best_f1_cv": 0.7626
     }
   }
 }

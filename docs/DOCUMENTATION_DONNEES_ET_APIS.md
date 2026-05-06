@@ -18,21 +18,27 @@
 
 ## 1. Vue d'ensemble
 
-Le projet agrège **7 sources de données** pour prédire les coupures d'électricité dans les hôpitaux. Ces données couvrent :
+> **Mise à jour 2026-05 (état actuel du code)**  
+> Le pipeline est désormais **multi-hôpitaux** et ingère des signaux externes additionnels (air quality, USGS, GDACS, GDELT, NOAA, Electricity Maps, Open-Meteo Forecast).  
+> Les sections OMS/Eskom ci-dessous sont conservées pour traçabilité, mais leur ingestion dédiée (`ingest_who.py`, `ingest_outages.py`) n'est plus active dans le pipeline courant.
 
-| Catégorie | Sources | Usage |
-|-----------|---------|-------|
-| Consommation hospitalière | Lacor, Phoenix, ERIC NHS | Variable cible + features de charge |
-| Météorologie | Open-Meteo Archive | Features climatiques |
-| Fiabilité réseau par pays | OMS GHO API | Feature macro-contextuelle |
-| Stabilité réseau | Eskom, EskomSePush | Features de load shedding |
-| Énergie hospitalière UK | NHS ERIC | Profils de consommation NHS |
+Le projet agrège des sources multi-pays pour prédire les coupures d'électricité dans les hôpitaux. Les familles de données actuellement fusionnées sont :
+
+| Catégorie | Sources principales | Usage |
+|-----------|---------------------|-------|
+| Consommation hospitalière | Lacor, ERIC NHS, NYC LL84 | Variable cible + profils de charge |
+| Météorologie historique | Open-Meteo Archive | Features climatiques |
+| Qualité de l'air | Open-Meteo Air Quality | Features environnementales |
+| Événements et risques | GDELT, USGS, GDACS, NOAA Storm | Features de stress exogène |
+| Contexte réseau local | Electricity Maps | Features mix/carbone/réseau |
 
 Le pipeline s'exécute via `run_pipeline.py` et orchestre les scripts d'ingestion dans l'ordre suivant :
 
 ```
-ingest_consumption → ingest_outages → ingest_who → ingest_meteo → ingest_eric
-    → preprocessing → build_features → train_baseline (RF + XGBoost + LightGBM + SHAP)
+ingest_consumption → ingest_meteo → ingest_eric → ingest_nyc_ll84
+    → ingest_gdelt → ingest_noaa_storm → ingest_air_quality
+    → ingest_usgs_earthquake → ingest_gdacs → ingest_openmeteo_forecast
+    → ingest_electricitymaps → preprocessing → build_features → train_baseline
 ```
 
 ---
@@ -229,6 +235,9 @@ Accept: application/json
 
 ### Utilisation dans le pipeline
 
+> **Statut actuel** : l'ingestion OMS dédiée n'est plus appelée par `run_pipeline.py`.  
+> Le fichier `data/raw/who_reliability.csv` reste disponible comme donnée de contexte historique.
+
 La fiabilité OMS est injectée comme **feature statique** dans le preprocessing (`add_who_context`). Pour l'Ouganda (pays de Lacor), la valeur utilisée est **50%** (source OMS 2018, zone `totl` la plus récente).
 
 Deux features dérivées :
@@ -375,6 +384,9 @@ Deux datasets complémentaires provenant du réseau électrique sud-africain, ut
 
 ### Utilisation dans le pipeline
 
+> **Statut actuel** : l'ingestion Eskom/EskomSePush dédiée n'est plus appelée par `run_pipeline.py`.  
+> Ces variables sont documentées ici à titre de traçabilité méthodologique.
+
 Les données Eskom sont agrégées en **3 features statiques** dans `preprocessing.py` → `add_loadshedding_context()` :
 
 | Feature | Calcul | Valeur typique | Description |
@@ -472,45 +484,28 @@ Le script génère **8 760 heures** de données par hôpital en modélisant :
 ## 9. Schéma de fusion des données
 
 ```
-                    ┌──────────────────┐
-                    │  Lacor Hospital   │
-                    │  (Excel, 15 min)  │
-                    │  35 040 lignes    │
-                    └────────┬─────────┘
-                             │ resample_lacor_hourly()
-                             │ 15 min → 1 heure
-                             ▼
-                    ┌──────────────────┐
-                    │  Lacor horaire    │
-                    │  8 760 lignes     │
-                    └────────┬─────────┘
-                             │
-          ┌──────────────────┼──────────────────┐
-          │                  │                  │
-          ▼                  ▼                  ▼
-┌─────────────────┐ ┌───────────────┐ ┌─────────────────┐
-│  Open-Meteo     │ │   OMS (WHO)   │ │ Eskom/EskomSePush│
-│  Archive API    │ │   GHO API     │ │  (CSV locaux)    │
-│  8 760 heures   │ │  39 records   │ │  44 494 lignes   │
-└────────┬────────┘ └──────┬────────┘ └────────┬────────┘
-         │                 │                   │
-         │ merge_asof      │ add_who_context   │ add_loadshedding_context
-         │ (±1 heure)      │ (statique)        │ (agrégé)
-         │                 │                   │
-         └─────────────────┼───────────────────┘
+      Bases hospitalières horaires (Lacor + ERIC NHS + NYC LL84)
                            │
                            ▼
-                  ┌──────────────────┐
-                  │ hospital_merged   │
-                  │ 8 760 × 17 cols  │
-                  └────────┬─────────┘
-                           │ build_features()
-                           ▼
-                  ┌──────────────────┐
-                  │ features_dataset  │
-                  │ 8 760 × 46 cols  │
-                  │ (31 actives)     │
-                  └──────────────────┘
+                ┌──────────────────────────┐
+                │  Enrichissement externe  │
+                │  (par hôpital, par heure)│
+                └───────────┬──────────────┘
+                            │
+        ┌───────────────────┼─────────────────────────────────────┐
+        ▼                   ▼                                     ▼
+ Open-Meteo (meteo)   Air quality / GDELT / USGS / GDACS   Electricity Maps
+        │                   │                                     │
+        └───────────────────┴─────────────────────────────────────┘
+                            │
+                            ▼
+                 `data/processed/hospital_merged.csv`
+                            │
+                            ▼
+                 `data/features/features_dataset.csv`
+                            │
+                            ▼
+                `src/models/train_baseline.py`
 ```
 
 ### Types de jointure
@@ -550,7 +545,7 @@ Le script génère **8 760 heures** de données par hôpital en modélisant :
 
 ### Variables dérivées (features)
 
-→ Voir la documentation `DOCUMENTATION_MODELE_ET_PREDICTIONS.md` pour le détail complet des 31 features actives (sur 46 colonnes totales).
+→ Voir la documentation `DOCUMENTATION_MODELE_ET_PREDICTIONS.md` pour le détail des features réellement utilisées à l'entraînement (liste calculée dynamiquement via `COLS_TO_DROP` dans `src/models/train_baseline.py`).
 
 ---
 
@@ -567,4 +562,4 @@ Le script génère **8 760 heures** de données par hôpital en modélisant :
 | EskomSePush | 670 | 670 | 2 | ~12 Ko |
 | ERIC NHS (résumé) | 10 | 10 | 21 | ~3 Ko |
 | ERIC NHS (horaire) | 87 600 | 87 600 | 10/site | ~80 Mo |
-| **Dataset final** | — | **8 760** | **46** (31 actives) | **~3 Mo** |
+| **Dataset final (courant)** | — | **~140 160** | **~138** (variable selon sources dispo) | **multi-Mo** |

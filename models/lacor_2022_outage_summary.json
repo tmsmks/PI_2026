@@ -1,0 +1,59 @@
+{
+  "hospital": "lacor_uganda",
+  "year": 2022,
+  "rows_total": 8760,
+  "outage_rows": 854,
+  "outage_events": 279,
+  "outage_rate_pct": 9.75,
+  "variables_analyzed": [
+    "total_load_kw",
+    "base_load_kw",
+    "solar_pv_kw",
+    "temperature_2m",
+    "relative_humidity_2m",
+    "wind_speed_10m",
+    "precipitation",
+    "surface_pressure"
+  ],
+  "hour_distribution_pct": {
+    "0": 7.53,
+    "1": 2.15,
+    "5": 0.36,
+    "6": 1.79,
+    "7": 3.94,
+    "8": 17.2,
+    "9": 0.72,
+    "10": 5.73,
+    "11": 3.94,
+    "12": 5.73,
+    "13": 6.45,
+    "14": 5.02,
+    "15": 2.51,
+    "16": 3.23,
+    "17": 6.81,
+    "18": 5.38,
+    "19": 9.32,
+    "20": 2.51,
+    "21": 2.15,
+    "22": 3.23,
+    "23": 4.3
+  },
+  "month_distribution_pct": {
+    "1": 7.53,
+    "2": 8.96,
+    "3": 9.32,
+    "4": 10.75,
+    "5": 11.11,
+    "6": 3.58,
+    "7": 6.45,
+    "8": 9.32,
+    "9": 8.96,
+    "10": 7.53,
+    "11": 8.96,
+    "12": 7.53
+  },
+  "files": {
+    "outage_moments": "models/lacor_2022_outage_moments.csv",
+    "circumstances_stats": "models/lacor_2022_outage_circumstances.csv"
+  }
+}
