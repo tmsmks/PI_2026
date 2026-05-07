@@ -4,7 +4,7 @@ Deux modes : Analyse historique + Simulation manuelle.
 """
 
 import sys
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import json
@@ -2464,46 +2464,169 @@ with tab_predict:
         data_label = "profil estimé (quasi temps réel)"
     else:
         data_label = "données historiques"
+
+    df_dt = pd.to_datetime(df["datetime"])
+    df_min_d = df_dt.min().date()
+    df_max_d = df_dt.max().date()
+    default_end_d = df_max_d
+    default_start_d = max(df_min_d, default_end_d - timedelta(days=2))
+
     st.markdown(
-        f"<p style='color:#888'>Estime le risque de coupure à court terme pour <b>{hospital['name']}</b> "
-        f"à partir des <b>72 dernières heures</b> ({data_label}). "
+        f"<p style='color:#888'>Estime le risque de coupure pour <b>{hospital['name']}</b> "
+        f"sur la <b>période de votre choix</b> ({data_label}). "
+        f"Données disponibles : <b>{df_min_d.isoformat()}</b> → <b>{df_max_d.isoformat()}</b>. "
         f"Seuil d'alerte principal : <b>50%</b>.</p>",
         unsafe_allow_html=True,
     )
-    ui_step("Étape 1", "Lancer l'analyse des données récentes")
+    ui_step("Étape 1", "Choisir la période d'analyse")
 
-    if st.button("Analyser le risque (72 h)", type="primary", width="stretch", key="btn_predict"):
-        try:
-            with st.spinner("Analyse des 72 dernières heures en cours…"):
-                recent = df.tail(72).copy()
-                if len(recent) < 2:
-                    st.warning("Pas assez de données pour l'analyse (minimum 2 heures requises).")
-                    st.stop()
-                X = ensure_numeric_feature_frame(recent, feature_cols)
-                proba_series = model.predict_proba(X)[:, 1]
-                recent["outage_probability"] = proba_series
+    PRESETS = {
+        "Personnalisé": None,
+        "Dernières 72 h disponibles": (
+            max(df_min_d, df_max_d - timedelta(days=2)), df_max_d,
+        ),
+        "Janvier 2022": (
+            max(df_min_d, date(2022, 1, 1)), min(df_max_d, date(2022, 1, 31)),
+        ),
+        "Saison sèche (déc-fév)": (
+            max(df_min_d, date(2022, 1, 1)), min(df_max_d, date(2022, 2, 28)),
+        ),
+        "Saison des pluies (mars-mai)": (
+            max(df_min_d, date(2022, 3, 1)), min(df_max_d, date(2022, 5, 31)),
+        ),
+        "Été (juin-août)": (
+            max(df_min_d, date(2022, 6, 1)), min(df_max_d, date(2022, 8, 31)),
+        ),
+        "Automne (sept-nov)": (
+            max(df_min_d, date(2022, 9, 1)), min(df_max_d, date(2022, 11, 30)),
+        ),
+        "Toute l'année 2022": (
+            max(df_min_d, date(2022, 1, 1)), min(df_max_d, date(2022, 12, 31)),
+        ),
+    }
 
-                high_risk = recent[recent["outage_probability"] > 0.5]
-                if high_risk.empty:
-                    max_idx = recent["outage_probability"].idxmax()
-                    max_proba = recent.loc[max_idx, "outage_probability"]
-                    hours_away = abs((recent.loc[max_idx, "datetime"] - recent["datetime"].iloc[-1]).total_seconds() / 3600)
-                else:
-                    max_proba = high_risk.iloc[0]["outage_probability"]
-                    hours_away = max(0, (high_risk.iloc[0]["datetime"] - recent["datetime"].iloc[-1]).total_seconds() / 3600)
+    col_preset, col_dates = st.columns([2, 3])
+    with col_preset:
+        preset_name = st.selectbox(
+            "Période prédéfinie",
+            options=list(PRESETS.keys()),
+            index=0,
+            key="predict_preset",
+            help="Choisis un raccourci ou « Personnalisé » pour fixer toi-même les dates.",
+        )
 
-                max_proba, h_notes = adjust_for_hospital_profile(max_proba, hospital)
-                recent["outage_probability"] = recent["outage_probability"].apply(
-                    lambda p: adjust_for_hospital_profile(p, hospital)[0]
-                )
-                duration = round(1.0 + max_proba * 4.0, 1) if max_proba > 0.5 else 0.5
-                last_row = ensure_numeric_feature_frame(df.tail(1), feature_cols).iloc[-1]
-                factors = get_top_factors(model, feature_cols, last_row)
-                last_row_df = pd.DataFrame([last_row])
-                shap_sv, shap_ev = compute_shap_local(shap_explainer, last_row_df, feature_cols)
-        except Exception as e:
-            st.error(f"**Erreur lors de l'analyse** : {e}")
-            st.stop()
+    if preset_name != "Personnalisé" and PRESETS[preset_name] is not None:
+        preset_start, preset_end = PRESETS[preset_name]
+    else:
+        preset_start, preset_end = default_start_d, default_end_d
+
+    with col_dates:
+        date_range = st.date_input(
+            "Période d'analyse",
+            value=(preset_start, preset_end),
+            min_value=df_min_d,
+            max_value=df_max_d,
+            key=f"predict_date_range_{preset_name}",
+        )
+
+    if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
+        start_date_pick, end_date_pick = date_range
+    elif isinstance(date_range, (list, tuple)) and len(date_range) == 1:
+        start_date_pick = end_date_pick = date_range[0]
+    else:
+        start_date_pick = end_date_pick = date_range
+
+    if start_date_pick > end_date_pick:
+        start_date_pick, end_date_pick = end_date_pick, start_date_pick
+
+    start_dt_sel = pd.Timestamp(start_date_pick)
+    end_dt_sel = pd.Timestamp(end_date_pick) + pd.Timedelta(hours=23, minutes=59)
+
+    selected_df = df[(df_dt >= start_dt_sel) & (df_dt <= end_dt_sel)].copy()
+    n_hours = len(selected_df)
+
+    if n_hours <= 1:
+        window_label = f"{n_hours} h"
+    elif n_hours <= 168:
+        window_label = f"{n_hours} h"
+    else:
+        window_label = f"{n_hours / 24:.0f} j"
+
+    st.caption(
+        f"📅 Fenêtre : **{start_date_pick.isoformat()}** → "
+        f"**{end_date_pick.isoformat()}** · **{n_hours} heures** de données "
+        f"({window_label})."
+    )
+
+    analysis_id = f"{hospital_key}:{start_date_pick.isoformat()}:{end_date_pick.isoformat()}"
+    analysis_state_key = "predict_analysis_result"
+    run_predict = st.button(
+        f"Analyser le risque sur la période ({window_label})",
+        type="primary",
+        width="stretch",
+        key="btn_predict",
+        disabled=n_hours < 2,
+    )
+    saved_predict = st.session_state.get(analysis_state_key)
+    has_saved_predict = (
+        isinstance(saved_predict, dict)
+        and saved_predict.get("analysis_id") == analysis_id
+    )
+
+    if run_predict or has_saved_predict:
+        if run_predict:
+            try:
+                with st.spinner(f"Analyse de {n_hours} heures en cours…"):
+                    recent = selected_df.copy()
+                    if len(recent) < 2:
+                        st.warning("Pas assez de données pour l'analyse (minimum 2 heures requises).")
+                        st.stop()
+                    X = ensure_numeric_feature_frame(recent, feature_cols)
+                    proba_series = model.predict_proba(X)[:, 1]
+                    recent["outage_probability"] = proba_series
+
+                    high_risk = recent[recent["outage_probability"] > 0.5]
+                    if high_risk.empty:
+                        max_idx = recent["outage_probability"].idxmax()
+                        max_proba = recent.loc[max_idx, "outage_probability"]
+                        hours_away = abs((recent.loc[max_idx, "datetime"] - recent["datetime"].iloc[-1]).total_seconds() / 3600)
+                    else:
+                        max_proba = high_risk.iloc[0]["outage_probability"]
+                        hours_away = max(0, (high_risk.iloc[0]["datetime"] - recent["datetime"].iloc[-1]).total_seconds() / 3600)
+
+                    max_proba, h_notes = adjust_for_hospital_profile(max_proba, hospital)
+                    recent["outage_probability"] = recent["outage_probability"].apply(
+                        lambda p: adjust_for_hospital_profile(p, hospital)[0]
+                    )
+                    duration = round(1.0 + max_proba * 4.0, 1) if max_proba > 0.5 else 0.5
+                    last_row = ensure_numeric_feature_frame(recent.tail(1), feature_cols).iloc[-1]
+                    factors = get_top_factors(model, feature_cols, last_row)
+                    last_row_df = pd.DataFrame([last_row])
+                    shap_sv, shap_ev = compute_shap_local(shap_explainer, last_row_df, feature_cols)
+
+                    st.session_state[analysis_state_key] = {
+                        "analysis_id": analysis_id,
+                        "recent": recent,
+                        "max_proba": max_proba,
+                        "hours_away": hours_away,
+                        "duration": duration,
+                        "h_notes": h_notes,
+                        "factors": factors,
+                        "shap_sv": shap_sv,
+                        "shap_ev": shap_ev,
+                    }
+            except Exception as e:
+                st.error(f"**Erreur lors de l'analyse** : {e}")
+                st.stop()
+        else:
+            recent = saved_predict["recent"]
+            max_proba = saved_predict["max_proba"]
+            hours_away = saved_predict["hours_away"]
+            duration = saved_predict["duration"]
+            h_notes = saved_predict["h_notes"]
+            factors = saved_predict["factors"]
+            shap_sv = saved_predict["shap_sv"]
+            shap_ev = saved_predict["shap_ev"]
 
         ui_step("Étape 2", "Résumé du risque estimé")
         show_risk_result(max_proba, hours_away, duration)
@@ -2522,7 +2645,7 @@ with tab_predict:
                 show_factors(factors)
 
         with col_chart:
-            st.subheader("Évolution du risque (72 h)")
+            st.subheader(f"Évolution du risque ({window_label})")
             fig = go.Figure()
             fig.add_trace(go.Scatter(
                 x=recent["datetime"], y=recent["outage_probability"],
@@ -2543,23 +2666,75 @@ with tab_predict:
         st.divider()
 
         ui_step("Étape 4", "Contexte de consommation et statistiques")
-        st.subheader(f"Consommation observée — {hospital['name']} (72 h)")
+        st.subheader(f"Consommation observée — {hospital['name']} ({window_label})")
+        consumption_view_mode = st.radio(
+            "Affichage du signal",
+            options=["Auto", "Horaire", "Journalier", "Hebdomadaire"],
+            horizontal=True,
+            key=f"consumption_view_mode_{start_date_pick}_{end_date_pick}",
+            help="Auto : vue horaire si ≤ 2 semaines, journalière jusqu’à ~11 semaines, "
+            "puis hebdomadaire au-delà (pour éviter les courbes illisibles).",
+        )
+
+        if consumption_view_mode == "Auto":
+            # Seuils resserrés : au-delà de ~2 semaines l’horaire devient trop dense.
+            if n_hours > 24 * 80:
+                resolved_view = "Hebdomadaire"
+            elif n_hours > 24 * 14:
+                resolved_view = "Journalier"
+            else:
+                resolved_view = "Horaire"
+        else:
+            resolved_view = consumption_view_mode
+
+        plot_df = recent.copy()
+        plot_df["datetime"] = pd.to_datetime(plot_df["datetime"])
+        if resolved_view in {"Journalier", "Hebdomadaire"}:
+            rule = "D" if resolved_view == "Journalier" else "W-SUN"
+            agg_spec = {"total_load_kw": "mean", "is_outage": "sum"}
+            if "solar_pv_kw" in plot_df.columns:
+                agg_spec["solar_pv_kw"] = "mean"
+            if "generators_kw" in plot_df.columns:
+                agg_spec["generators_kw"] = "mean"
+            plot_df = (
+                plot_df
+                .set_index("datetime")
+                .resample(rule)
+                .agg(agg_spec)
+                .reset_index()
+            )
+
+        outage_col = "is_outage"
+        outage_mask = plot_df[outage_col] > 0 if outage_col in plot_df.columns else pd.Series(False, index=plot_df.index)
+        st.caption(
+            f"Vue utilisée : **{resolved_view}** ({len(plot_df)} points affichés). "
+            "Astuce : choisis **Journalier** ou **Hebdomadaire** si la courbe bleue "
+            "forme encore un « ruban » illisible."
+        )
+
+        show_detail_traces = st.checkbox(
+            "Afficher solaire & générateur (détail)",
+            value=(resolved_view == "Horaire"),
+            key=f"consumption_detail_{start_date_pick}_{end_date_pick}",
+            help="Sur les longues périodes, masquer ces courbes met en avant la charge totale.",
+        )
+
         fig2 = go.Figure()
         fig2.add_trace(go.Scatter(
-            x=recent["datetime"], y=recent["total_load_kw"],
+            x=plot_df["datetime"], y=plot_df["total_load_kw"],
             mode="lines", name="Charge totale", line=dict(color="#3498db", width=2),
         ))
-        if "solar_pv_kw" in recent.columns:
+        if show_detail_traces and "solar_pv_kw" in plot_df.columns:
             fig2.add_trace(go.Scatter(
-                x=recent["datetime"], y=recent["solar_pv_kw"],
+                x=plot_df["datetime"], y=plot_df["solar_pv_kw"],
                 mode="lines", name="Solaire PV", line=dict(color="#f1c40f", width=2),
             ))
-        if "generators_kw" in recent.columns:
+        if show_detail_traces and "generators_kw" in plot_df.columns:
             fig2.add_trace(go.Scatter(
-                x=recent["datetime"], y=recent["generators_kw"],
+                x=plot_df["datetime"], y=plot_df["generators_kw"],
                 mode="lines", name="Générateur", line=dict(color="#e67e22", width=2),
             ))
-        outages = recent[recent["is_outage"] == 1]
+        outages = plot_df[outage_mask]
         if not outages.empty:
             fig2.add_trace(go.Scatter(
                 x=outages["datetime"], y=outages["total_load_kw"],
@@ -2567,21 +2742,54 @@ with tab_predict:
                 name="Coupures",
             ))
         fig2.update_layout(
-            yaxis=dict(title="Puissance (kW)"), xaxis=dict(title=""),
+            yaxis=dict(title="Puissance (kW)"),
+            xaxis=dict(title="", rangeslider=dict(visible=True)),
             height=300, margin=dict(l=40, r=20, t=20, b=40),
             legend=dict(orientation="h", yanchor="bottom", y=1.02),
         )
         st.plotly_chart(fig2, width="stretch")
 
-        st.subheader(f"Statistiques clés — {hospital['name']}")
+        if "is_outage" in recent.columns and n_hours >= 48:
+            wo = (
+                recent.assign(datetime=pd.to_datetime(recent["datetime"]))
+                .set_index("datetime")["is_outage"]
+                .resample("W-SUN")
+                .sum()
+                .reset_index()
+            )
+            wo = wo[wo["is_outage"] > 0]
+            if not wo.empty:
+                st.markdown("**Résumé des coupures (heures / semaine)**")
+                fig_out = go.Figure(
+                    go.Bar(
+                        x=wo["datetime"],
+                        y=wo["is_outage"],
+                        marker_color="#e74c3c",
+                        name="Heures en coupure",
+                    )
+                )
+                fig_out.update_layout(
+                    yaxis=dict(title="Heures"),
+                    xaxis=dict(title=""),
+                    height=240,
+                    margin=dict(l=40, r=20, t=20, b=40),
+                    showlegend=False,
+                )
+                st.plotly_chart(fig_out, width="stretch")
+
+        st.subheader(f"Statistiques clés — {hospital['name']} (période analysée)")
         s1, s2, s3, s4 = st.columns(4)
-        n_outages = int(df["is_outage"].sum()) if "is_outage" in df.columns else 0
-        pct_outage = 100 * df["is_outage"].mean() if "is_outage" in df.columns and len(df) > 0 else 0
+        n_outages = int(recent["is_outage"].sum()) if "is_outage" in recent.columns else 0
+        pct_outage = (
+            100 * recent["is_outage"].mean()
+            if "is_outage" in recent.columns and len(recent) > 0
+            else 0
+        )
         outage_label = "Coupures (2022)" if hospital.get("data_source") != "africa_grid" else "Coupures estimées (fenêtre affichée)"
         s1.metric(outage_label, f"{n_outages}")
         s2.metric("Taux de coupure", f"{pct_outage:.2f}%")
-        s3.metric("Charge moyenne", f"{df['total_load_kw'].mean():.0f} kW")
-        s4.metric("Charge max", f"{df['total_load_kw'].max():.0f} kW")
+        s3.metric("Charge moyenne", f"{recent['total_load_kw'].mean():.0f} kW")
+        s4.metric("Charge max", f"{recent['total_load_kw'].max():.0f} kW")
 
 
 # ═══════════════════════════════════════════════════════════════════

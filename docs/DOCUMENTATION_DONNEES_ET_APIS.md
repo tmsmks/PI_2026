@@ -1,53 +1,83 @@
 # Documentation des données et APIs
 
+> **Mise à jour 2026-05** — ce document décrit l'état réel du pipeline tel
+> qu'orchestré par `run_pipeline.py` (modes `train` et `live`).
+
 ## Table des matières
 
 1. [Vue d'ensemble](#1-vue-densemble)
-2. [Source 1 — Lacor Hospital (dataset principal)](#2-source-1--lacor-hospital-dataset-principal)
-3. [Source 2 — Phoenix Hospital (benchmark)](#3-source-2--phoenix-hospital-benchmark)
-4. [Source 3 — API OMS (WHO GHO)](#4-source-3--api-oms-who-gho)
-5. [Source 4 — API Open-Meteo Archive](#5-source-4--api-open-meteo-archive)
-6. [Source 5 — Eskom / EskomSePush (Afrique du Sud)](#6-source-5--eskom--eskomsepush-afrique-du-sud)
-7. [Source 6 — NHS ERIC (Angleterre)](#7-source-6--nhs-eric-angleterre)
-8. [Source 7 — Kaggle Hospital Energy](#8-source-7--kaggle-hospital-energy)
-9. [Schéma de fusion des données](#9-schéma-de-fusion-des-données)
-10. [Dictionnaire des variables](#10-dictionnaire-des-variables)
-11. [Résumé des volumétries](#11-résumé-des-volumétries)
+2. [Source 1 — Lacor Hospital (dataset principal de la cible)](#2-source-1--lacor-hospital-dataset-principal-de-la-cible)
+3. [Source 2 — NHS ERIC (10 hôpitaux UK)](#3-source-2--nhs-eric-10-hôpitaux-uk)
+4. [Source 3 — NYC LL84 (5 hôpitaux USA)](#4-source-3--nyc-ll84-5-hôpitaux-usa)
+5. [Source 4 — Open-Meteo (Archive + Forecast)](#5-source-4--open-meteo-archive--forecast)
+6. [Source 5 — Open-Meteo Air Quality](#6-source-5--open-meteo-air-quality)
+7. [Source 6 — USGS Earthquake Catalog](#7-source-6--usgs-earthquake-catalog)
+8. [Source 7 — GDACS (catastrophes)](#8-source-7--gdacs-catastrophes)
+9. [Source 8 — GDELT DOC 2.0 (signal médiatique)](#9-source-8--gdelt-doc-20-signal-médiatique)
+10. [Source 9 — NOAA Storm Events (USA)](#10-source-9--noaa-storm-events-usa)
+11. [Source 10 — Electricity Maps (réseau local)](#11-source-10--electricity-maps-réseau-local)
+12. [Schéma de fusion des données](#12-schéma-de-fusion-des-données)
+13. [Dictionnaire des variables](#13-dictionnaire-des-variables)
+14. [Modes train / live et fenêtres temporelles](#14-modes-train--live-et-fenêtres-temporelles)
+15. [Sources historiques retirées du pipeline](#15-sources-historiques-retirées-du-pipeline)
 
 ---
 
 ## 1. Vue d'ensemble
 
-> **Mise à jour 2026-05 (état actuel du code)**  
-> Le pipeline est désormais **multi-hôpitaux** et ingère des signaux externes additionnels (air quality, USGS, GDACS, GDELT, NOAA, Electricity Maps, Open-Meteo Forecast).  
-> Les sections OMS/Eskom ci-dessous sont conservées pour traçabilité, mais leur ingestion dédiée (`ingest_who.py`, `ingest_outages.py`) n'est plus active dans le pipeline courant.
-
-Le projet agrège des sources multi-pays pour prédire les coupures d'électricité dans les hôpitaux. Les familles de données actuellement fusionnées sont :
+Le projet agrège **10 sources de données** complémentaires pour prédire les
+coupures d'électricité dans les hôpitaux. La cible (`is_outage`) provient
+exclusivement du dataset **Lacor Hospital** (relevés terrain). Les autres
+sources construisent le contexte (consommation comparée, météo, pollution,
+événements, réseau électrique).
 
 | Catégorie | Sources principales | Usage |
 |-----------|---------------------|-------|
-| Consommation hospitalière | Lacor, ERIC NHS, NYC LL84 | Variable cible + profils de charge |
+| Consommation hospitalière | Lacor (terrain), ERIC NHS (UK), NYC LL84 (USA) | Variable cible (Lacor) + profils de charge (16 sites) |
 | Météorologie historique | Open-Meteo Archive | Features climatiques |
-| Qualité de l'air | Open-Meteo Air Quality | Features environnementales |
-| Événements et risques | GDELT, USGS, GDACS, NOAA Storm | Features de stress exogène |
-| Contexte réseau local | Electricity Maps | Features mix/carbone/réseau |
+| Météorologie prévisionnelle | Open-Meteo Forecast | Onglet « Prévisions J+7 » de l'app |
+| Qualité de l'air | Open-Meteo Air Quality | Pollution, dust, AQI |
+| Risque sismique | USGS Earthquake Catalog | Magnitude, stress 24 h / 7 j |
+| Catastrophes naturelles | GDACS (JRC/OCHA) | Inondations, cyclones, sécheresses, etc. |
+| Signal médiatique | GDELT DOC 2.0 | 4 thèmes (Lacor + Phoenix uniquement) |
+| Tempêtes USA | NOAA Storm Events | Phoenix uniquement |
+| Réseau électrique local | Electricity Maps API | Zone, charge MW, mix, carbone |
 
-Le pipeline s'exécute via `run_pipeline.py` et orchestre les scripts d'ingestion dans l'ordre suivant :
+Le pipeline s'exécute via `run_pipeline.py` (CLI : `--mode {train,live}`,
+`--window-days`, `--fast`, `--grid-scale`, `--cv-folds`,
+`--shap-sample-size`, `--no-full-artifacts`).
 
 ```
-ingest_consumption → ingest_meteo → ingest_eric → ingest_nyc_ll84
-    → ingest_gdelt → ingest_noaa_storm → ingest_air_quality
-    → ingest_usgs_earthquake → ingest_gdacs → ingest_openmeteo_forecast
-    → ingest_electricitymaps → preprocessing → build_features → train_baseline
+ingest_consumption  →  ingest_meteo  →  ingest_eric  →  ingest_nyc_ll84
+        ↓                ↓                ↓                  ↓
+ingest_gdelt → ingest_noaa_storm → ingest_air_quality
+        ↓                ↓                ↓
+ingest_usgs_earthquake → ingest_gdacs → ingest_openmeteo_forecast
+                            ↓
+                ingest_electricitymaps
+                            ↓
+                  preprocessing (fusion multi-hôpitaux)
+                            ↓
+                  build_features (feature engineering)
+                            ↓
+                  train_baseline (RF / XGB / LGBM + calibration + SHAP)
 ```
+
+Toutes les ingestions sont enveloppées dans un `try/except` : si une source
+externe est indisponible, le pipeline continue avec les autres signaux et
+l'entraînement final ne plante pas.
 
 ---
 
-## 2. Source 1 — Lacor Hospital (dataset principal)
+## 2. Source 1 — Lacor Hospital (dataset principal de la cible)
 
 ### Description
 
-Le dataset principal est celui du **St. Mary's Hospital Lacor** situé à Gulu, dans le nord de l'Ouganda. C'est un hôpital de 482 lits alimenté par un mix réseau/solaire/générateur diesel.
+Le dataset principal est celui du **St. Mary's Hospital Lacor** situé à
+Gulu, dans le nord de l'Ouganda. C'est un hôpital de 482 lits alimenté par
+un mix réseau / solaire / générateur diesel. **C'est la seule source qui
+contient la variable cible `is_outage`** ; tous les autres hôpitaux sont
+donc utilisés en train comme contexte de profil de charge.
 
 ### Métadonnées
 
@@ -57,11 +87,12 @@ Le dataset principal est celui du **St. Mary's Hospital Lacor** situé à Gulu, 
 | **DOI** | `10.5281/zenodo.7466652` |
 | **Format** | Excel (.xlsx), feuille "Sheet1" |
 | **Résolution** | 15 minutes |
-| **Période** | 1er janvier 2022 — 31 décembre 2022 |
-| **Volume** | 35 040 lignes × 7 colonnes |
-| **Taux de coupures** | 9.7% des intervalles de 15 min |
+| **Période** | 1er janvier 2022 → 31 décembre 2022 |
+| **Volume brut** | 35 040 lignes × 7 colonnes |
+| **Volume horaire** | 8 760 lignes × 8 colonnes |
+| **Taux de coupures (horaire)** | ~9.7 % des heures |
 | **Fichier local** | `data/raw/lacor_hospital.xlsx` |
-| **Script** | `src/data/ingest_consumption.py` → `load_lacor()` |
+| **Script** | `src/data/ingest_consumption.py` |
 
 ### Colonnes brutes
 
@@ -72,12 +103,10 @@ Le dataset principal est celui du **St. Mary's Hospital Lacor** situé à Gulu, 
 | `Total load kW` | `total_load_kw` | float | Consommation électrique totale (kW) |
 | `Generators kW` | `generators_kw` | float | Production des générateurs diesel (kW) |
 | `Sterilization kW` | `sterilization_kw` | float | Consommation stérilisation (kW) |
-| `Base load kW` | `base_load_kw` | float | Charge de base (éclairage, ventilation, etc.) |
+| `Base load kW` | `base_load_kw` | float | Charge de base (kW) |
 | `Grid avail` | `grid_available` | int (0/1) | 1 = réseau disponible, 0 = coupure |
 
 ### Variable cible
-
-La variable cible `is_outage` est dérivée de `grid_available` :
 
 ```
 is_outage = 1 - grid_available
@@ -86,324 +115,28 @@ is_outage = 1 - grid_available
 - `is_outage = 1` → coupure de réseau en cours
 - `is_outage = 0` → réseau fonctionnel
 
-### Rééchantillonnage
+### Rééchantillonnage 15 min → 1 h
 
-Les données sont rééchantillonnées de 15 min à **1 heure** dans `preprocessing.py` :
+Effectué par `src/data/preprocessing.py` (`resample_lacor_hourly`) :
 
-| Variable | Règle d'agrégation |
-|----------|--------------------|
-| `solar_pv_kw`, `total_load_kw`, `generators_kw`, `sterilization_kw`, `base_load_kw` | **Moyenne** horaire |
-| `grid_available` | **Moyenne** → devient `grid_availability_ratio` (0.0 à 1.0) |
-| `is_outage` | **Max** → 1 si au moins une coupure dans l'heure |
+| Variable | Règle d'agrégation horaire |
+|----------|----------------------------|
+| `solar_pv_kw`, `total_load_kw`, `generators_kw`, `sterilization_kw`, `base_load_kw` | Moyenne |
+| `grid_available` | Moyenne → renommée `grid_availability_ratio` (∈ [0, 1]) |
+| `is_outage` | Max → 1 si au moins une coupure dans l'heure |
 
-Résultat : **8 760 lignes** horaires.
-
-### Statistiques descriptives
-
-| Variable | Moyenne | Écart-type | Min | Max |
-|----------|---------|-----------|-----|-----|
-| `total_load_kw` | 133 kW | 42 kW | 18 kW | 235 kW |
-| `solar_pv_kw` | 19 kW | 31 kW | 0 kW | 130 kW |
-| `generators_kw` | 14 kW | 39 kW | 0 kW | 180 kW |
-| `base_load_kw` | 113 kW | 36 kW | 15 kW | 200 kW |
+Résultat : **8 760 lignes horaires**.
 
 ---
 
-## 3. Source 2 — Phoenix Hospital (benchmark)
+## 3. Source 2 — NHS ERIC (10 hôpitaux UK)
 
 ### Description
 
-Dataset de consommation d'un hôpital à Phoenix, Arizona (USA). Il ne contient **pas de variable cible** (pas d'indication de coupure). Il sert de benchmark pour comparer les profils de consommation.
-
-### Métadonnées
-
-| Attribut | Valeur |
-|----------|--------|
-| **Source** | GitHub (Shahid-Fakhri/Electricity-Consumption) |
-| **Format** | Excel (.xlsx), feuille "in" |
-| **Résolution** | 1 heure |
-| **Volume** | 8 760 lignes × 11 colonnes |
-| **Fichier local** | `data/raw/phoenix_hospital.xlsx` |
-| **Script** | `src/data/ingest_consumption.py` → `load_phoenix()` |
-
-### Colonnes brutes
-
-| Colonne originale | Colonne renommée | Description |
-|-------------------|-----------------|-------------|
-| `Date/Time` | `datetime` | Format `MM/DD  HH:MM:SS` (année ajoutée : 2022) |
-| `Electricity:Facility [kW](Hourly)` | `total_electricity_kw` | Consommation totale (kW) |
-| `Fans:Electricity [kW](Hourly)` | `fans_kw` | Ventilation (kW) |
-| `Cooling:Electricity [kW](Hourly)` | `cooling_kw` | Climatisation (kW) |
-| `Heating:Electricity [kW](Hourly)` | `heating_kw` | Chauffage électrique (kW) |
-| `InteriorLights:Electricity [kW](Hourly)` | `lights_kw` | Éclairage (kW) |
-| `InteriorEquipment:Electricity [kW](Hourly)` | `equipment_kw` | Équipements (kW) |
-| `Gas:Facility [kW](Hourly)` | `total_gas_kw` | Consommation gaz (kW) |
-
----
-
-## 4. Source 3 — API OMS (WHO GHO)
-
-### Description
-
-L'Organisation Mondiale de la Santé publie via son API **Global Health Observatory** (GHO) des indicateurs de fiabilité de l'approvisionnement électrique des établissements de santé par pays.
-
-### Endpoints utilisés
-
-#### 4.1. Fiabilité électrique des hôpitaux
-
-| Attribut | Valeur |
-|----------|--------|
-| **URL de base** | `https://ghoapi.azureedge.net/api` |
-| **Endpoint** | `GET /HCF_REL_ELECTRICITY` |
-| **Indicateur OMS** | Pourcentage d'établissements avec électricité fiable (sans coupure > 2h) |
-| **Authentification** | Aucune |
-| **Rate limit** | Non documenté (usage raisonnable recommandé) |
-| **Format réponse** | JSON (champ `value` contenant un tableau d'enregistrements) |
-| **Script** | `src/data/ingest_who.py` → `fetch_who_reliability()` |
-| **Fichier de sortie** | `data/raw/who_reliability.csv` |
-
-**Requête HTTP :**
-
-```
-GET https://ghoapi.azureedge.net/api/HCF_REL_ELECTRICITY
-Accept: application/json
-```
-
-**Structure de la réponse :**
-
-```json
-{
-  "value": [
-    {
-      "SpatialDim": "UGA",
-      "TimeDim": 2018,
-      "Dim1": "RESIDENCEAREATYPE_totl",
-      "NumericValue": 50.0,
-      "ParentLocationCode": "AFR",
-      "ParentLocation": "Africa"
-    }
-  ]
-}
-```
-
-**Mapping des colonnes :**
-
-| Champ JSON | Colonne CSV | Description |
-|------------|-------------|-------------|
-| `SpatialDim` | `country_code` | Code ISO 3 lettres du pays |
-| `TimeDim` | `year` | Année de l'enquête |
-| `Dim1` | `area_type` | Zone : `urb` (urbain), `rur` (rural), `totl` (total) |
-| `NumericValue` | `reliability_pct` | % d'établissements avec électricité fiable |
-| `ParentLocationCode` | `region_code` | Code de la région OMS |
-| `ParentLocation` | `region` | Nom de la région OMS |
-
-**Pays disponibles (39 enregistrements) :**
-
-| Pays | Code | Fiabilité total (%) | Année |
-|------|------|---------------------|-------|
-| Sénégal | SEN | 45% | 2019 |
-| Niger | NER | 19% | 2015 |
-| Bangladesh | BGD | 20% | 2017 |
-| Éthiopie | ETH | 23% | 2016 |
-| Haïti | HTI | 33% | 2016 |
-| Zimbabwe | ZWE | 48% | 2015 |
-| Kenya | KEN | 54% | 2018 |
-| Népal | NPL | 56% | 2021 |
-| Sierra Leone | SLE | 55% | 2018 |
-| Tanzanie | TZA | 63% | 2016 |
-| Liberia | LBR | 81% | 2018 |
-| Honduras | HND | 89% | 2019 |
-| Sri Lanka | LKA | 91% | 2017 |
-| Bolivie | BOL | 95% | 2019 |
-
-#### 4.2. Table de correspondance pays
-
-| Attribut | Valeur |
-|----------|--------|
-| **Endpoint** | `GET /Dimension/COUNTRY/DimensionValues` |
-| **Script** | `src/data/ingest_who.py` → `fetch_who_countries()` |
-| **Fichier de sortie** | `data/raw/who_countries.csv` |
-
-**Colonnes extraites :**
-
-| Champ JSON | Colonne CSV | Description |
-|------------|-------------|-------------|
-| `Code` | `country_code` | Code ISO 3 lettres |
-| `Title` | `country_name` | Nom officiel du pays |
-| `ParentCode` | `region_code` | Code région OMS |
-| `ParentTitle` | `region` | Nom de la région OMS |
-
-### Utilisation dans le pipeline
-
-> **Statut actuel** : l'ingestion OMS dédiée n'est plus appelée par `run_pipeline.py`.  
-> Le fichier `data/raw/who_reliability.csv` reste disponible comme donnée de contexte historique.
-
-La fiabilité OMS est injectée comme **feature statique** dans le preprocessing (`add_who_context`). Pour l'Ouganda (pays de Lacor), la valeur utilisée est **50%** (source OMS 2018, zone `totl` la plus récente).
-
-Deux features dérivées :
-- `who_reliability_pct` = 50.0 (valeur brute)
-- `reliability_risk` = 1 − 50 / 100 = **0.50** (risque inversé)
-
----
-
-## 5. Source 4 — API Open-Meteo Archive
-
-### Description
-
-Open-Meteo fournit des données météorologiques historiques horaires gratuites, sans authentification, à partir de modèles de réanalyse (ERA5 / CERRA).
-
-### Configuration de l'API
-
-| Attribut | Valeur |
-|----------|--------|
-| **URL de base** | `https://archive-api.open-meteo.com/v1/archive` |
-| **Méthode** | `GET` |
-| **Authentification** | Aucune |
-| **Rate limit** | 10 000 requêtes/jour (gratuit) |
-| **Format réponse** | JSON |
-| **Script** | `src/data/ingest_meteo.py` → `fetch_meteo_archive()` |
-| **Fichier de sortie** | `data/raw/meteo_lacor_uganda.csv` (et `meteo_phoenix_usa.csv`) |
-
-**Requête HTTP :**
-
-```
-GET https://archive-api.open-meteo.com/v1/archive
-  ?latitude=2.77
-  &longitude=32.30
-  &hourly=temperature_2m,relative_humidity_2m,wind_speed_10m,precipitation,surface_pressure,shortwave_radiation
-  &start_date=2022-01-01
-  &end_date=2022-12-31
-  &timezone=auto
-```
-
-### Paramètres de requête
-
-| Paramètre | Valeur | Description |
-|-----------|--------|-------------|
-| `latitude` | 2.77 (Lacor) | Latitude du site |
-| `longitude` | 32.30 (Lacor) | Longitude du site |
-| `hourly` | 6 variables (voir ci-dessous) | Variables météo demandées |
-| `start_date` | `2022-01-01` | Début de la période |
-| `end_date` | `2022-12-31` | Fin de la période |
-| `timezone` | `auto` | Fuseau horaire automatique |
-
-### Variables météorologiques récupérées
-
-| Variable API | Colonne CSV | Unité | Description |
-|-------------|-------------|-------|-------------|
-| `temperature_2m` | `temperature_2m` | °C | Température à 2 m du sol |
-| `relative_humidity_2m` | `relative_humidity_2m` | % | Humidité relative à 2 m |
-| `wind_speed_10m` | `wind_speed_10m` | km/h | Vitesse du vent à 10 m |
-| `precipitation` | `precipitation` | mm | Précipitations (pluie + neige) |
-| `surface_pressure` | `surface_pressure` | hPa | Pression atmosphérique au sol |
-| `shortwave_radiation` | `shortwave_radiation` | W/m² | Rayonnement solaire incident (ondes courtes) |
-
-### Structure de la réponse JSON
-
-```json
-{
-  "latitude": 2.75,
-  "longitude": 32.25,
-  "generationtime_ms": 4.5,
-  "utc_offset_seconds": 10800,
-  "timezone": "Africa/Nairobi",
-  "hourly": {
-    "time": ["2022-01-01T00:00", "2022-01-01T01:00", ...],
-    "temperature_2m": [21.3, 20.8, ...],
-    "relative_humidity_2m": [78, 82, ...],
-    "wind_speed_10m": [4.2, 3.8, ...],
-    "precipitation": [0.0, 0.0, ...],
-    "surface_pressure": [884.5, 884.3, ...],
-    "shortwave_radiation": [0, 0, ...]
-  }
-}
-```
-
-### Fusion avec les données de consommation
-
-La jonction se fait via `pd.merge_asof` (jointure temporelle au plus proche) dans `preprocessing.py` → `merge_with_meteo()`, avec une tolérance de **1 heure**. Les valeurs manquantes sont comblées par interpolation linéaire, puis forward/backward fill.
-
-### Sites interrogés
-
-| Hôpital | Latitude | Longitude | Pays |
-|---------|----------|-----------|------|
-| Lacor Hospital | 2.77 | 32.30 | UGA |
-| Phoenix Hospital | 33.45 | -112.07 | USA |
-
----
-
-## 6. Source 5 — Eskom / EskomSePush (Afrique du Sud)
-
-### Description
-
-Deux datasets complémentaires provenant du réseau électrique sud-africain, utilisés pour modéliser le contexte d'instabilité des réseaux africains.
-
-### 6.1. Données de production Eskom
-
-| Attribut | Valeur |
-|----------|--------|
-| **Source** | Eskom Data Portal |
-| **Fichier** | `ESK2033.csv` |
-| **Volume** | 43 824 lignes |
-| **Période** | 2018 — 2022 |
-| **Résolution** | Horaire |
-| **Fichier local** | `data/raw/sa_electricity/ESK2033.csv` |
-| **Script** | `src/data/ingest_outages.py` → `load_eskom_production()` |
-
-**Colonnes utilisées :**
-
-| Colonne | Type | Description |
-|---------|------|-------------|
-| `datetime_str` | string | Horodatage |
-| `Residual Demand` | float | Demande résiduelle (MW) |
-| `Dispatchable Generation` | float | Production pilotable (MW) |
-| `Thermal Generation` | float | Production thermique (MW) |
-| `Nuclear Generation` | float | Production nucléaire (MW) |
-| `Wind` | float | Production éolienne (MW) |
-| `PV` | float | Production solaire (MW) |
-| `Total RE` | float | Total renouvelables (MW) |
-| `Manual Load_Reduction(MLR)` | float | Réduction manuelle de charge (MW) — indicateur de délestage |
-| `ILS Usage` | float | Interruptible Load Shedding (MW) |
-
-### 6.2. Historique de load shedding (EskomSePush)
-
-| Attribut | Valeur |
-|----------|--------|
-| **Source** | EskomSePush (application mobile) |
-| **Fichier** | `EskomSePush_history.csv` |
-| **Volume** | 670 événements |
-| **Fichier local** | `data/raw/sa_electricity/EskomSePush_history.csv` |
-| **Script** | `src/data/ingest_outages.py` → `load_loadshedding_history()` |
-
-**Colonnes :**
-
-| Colonne | Type | Description |
-|---------|------|-------------|
-| `created_at` | datetime | Date/heure de l'événement |
-| `stage` | int | Niveau de load shedding (0 = inactif, 2-6 = niveaux croissants) |
-
-### Utilisation dans le pipeline
-
-> **Statut actuel** : l'ingestion Eskom/EskomSePush dédiée n'est plus appelée par `run_pipeline.py`.  
-> Ces variables sont documentées ici à titre de traçabilité méthodologique.
-
-Les données Eskom sont agrégées en **3 features statiques** dans `preprocessing.py` → `add_loadshedding_context()` :
-
-| Feature | Calcul | Valeur typique | Description |
-|---------|--------|----------------|-------------|
-| `loadshed_avg_stage` | `mean(stage)` | ~1.5 | Niveau moyen de load shedding |
-| `loadshed_max_stage` | `max(stage)` | 6 | Niveau maximum observé |
-| `loadshed_pct_active` | `mean(stage > 0)` | ~0.65 | % du temps en load shedding |
-
----
-
-## 7. Source 6 — NHS ERIC (Angleterre)
-
-### Description
-
-**ERIC** (Estates Returns Information Collection) est une collecte annuelle **obligatoire** de tous les NHS Trusts en Angleterre. Elle contient les données d'utilités (électricité, gaz, eau), les coûts et la surface de chaque site hospitalier.
-
-### Métadonnées
+**ERIC** (Estates Returns Information Collection) est une collecte annuelle
+**obligatoire** de tous les NHS Trusts en Angleterre. Elle contient les
+données d'utilités (électricité, gaz, eau), les coûts et la surface de
+chaque site hospitalier.
 
 | Attribut | Valeur |
 |----------|--------|
@@ -412,34 +145,35 @@ Les données Eskom sont agrégées en **3 features statiques** dans `preprocessi
 | **Édition de référence** | ERIC 2022-23 (publiée le 14 décembre 2023) |
 | **Couverture** | ~1 200 sites hospitaliers en Angleterre |
 | **Énergie totale NHS** | 11.1 TWh (2022-23) |
-| **Surface totale NHS** | ~28 millions m² |
 | **Coût moyen électricité** | ~£115/MWh |
 | **Script** | `src/data/ingest_eric.py` |
 | **Répertoire local** | `data/raw/eric/` |
 
-### Accès aux données
+### Stratégie d'accès
 
-Le site NHS Digital bloque les accès programmatiques (code HTTP 403). Le script `ingest_eric.py` adopte une double stratégie :
+Le site NHS Digital bloque les accès programmatiques (HTTP 403). Le script
+`ingest_eric.py` adopte donc une double stratégie :
 
-1. **Si un fichier CSV local est disponible** (`data/raw/eric/eric_site_level.csv`) : chargement direct.
-2. **Sinon** : construction d'un dataset réaliste à partir des statistiques agrégées publiées.
+1. **Si `data/raw/eric/eric_site_level.csv` existe** : chargement direct.
+2. **Sinon** : génération d'un dataset réaliste à partir des statistiques
+   agrégées publiées (consommations annuelles + ratios kWh/m² ERIC).
 
 ### Hôpitaux référencés (10 sites)
 
-| Site | Code | Trust | Ville | Lits | Surface (m²) | Électricité (GWh/an) | Coût (M£) |
-|------|------|-------|-------|------|---------------|----------------------|-----------|
-| St Thomas' Hospital | RJ121 | Guy's & St Thomas' | London | 840 | 150 000 | 82 | 9.43 |
-| Guy's Hospital | RJ122 | Guy's & St Thomas' | London | 400 | 82 000 | 48 | 5.52 |
-| John Radcliffe Hospital | RTH01 | Oxford Uni. Hospitals | Oxford | 832 | 120 000 | 62 | 7.13 |
-| Addenbrooke's Hospital | RGT01 | Cambridge Uni. Hospitals | Cambridge | 1 000 | 160 000 | 78 | 8.97 |
-| Manchester Royal Infirmary | R0A01 | Manchester Uni. | Manchester | 752 | 115 000 | 58 | 6.67 |
-| Leeds General Infirmary | RR801 | Leeds Teaching | Leeds | 700 | 100 000 | 52 | 5.98 |
-| Birmingham Heartlands | RQ301 | Uni. Hospitals Birmingham | Birmingham | 660 | 95 000 | 46 | 5.29 |
-| Royal Victoria Infirmary | RA701 | Newcastle Hospitals | Newcastle | 900 | 130 000 | 68 | 7.82 |
-| Royal Devon & Exeter | RA401 | Royal Devon Uni. | Exeter | 600 | 80 000 | 38 | 4.37 |
-| King's College Hospital | RXH01 | King's College | London | 950 | 140 000 | 72 | 8.28 |
+| Site | Code | Trust | Ville | Lits | Surface (m²) | Électricité (GWh/an) |
+|------|------|-------|-------|------|---------------|----------------------|
+| St Thomas' Hospital | RJ121 | Guy's & St Thomas' | London | 840 | 150 000 | 82 |
+| Guy's Hospital | RJ122 | Guy's & St Thomas' | London | 400 | 82 000 | 48 |
+| John Radcliffe Hospital | RTH01 | Oxford Uni. Hospitals | Oxford | 832 | 120 000 | 62 |
+| Addenbrooke's Hospital | RGT01 | Cambridge Uni. Hospitals | Cambridge | 1 000 | 160 000 | 78 |
+| Manchester Royal Infirmary | R0A01 | Manchester Uni. | Manchester | 752 | 115 000 | 58 |
+| Leeds General Infirmary | RR801 | Leeds Teaching | Leeds | 700 | 100 000 | 52 |
+| Birmingham Heartlands | RQ301 | Uni. Hospitals Birmingham | Birmingham | 660 | 95 000 | 46 |
+| Royal Victoria Infirmary | RA701 | Newcastle Hospitals | Newcastle | 900 | 130 000 | 68 |
+| Royal Devon & Exeter | RA401 | Royal Devon Uni. | Exeter | 600 | 80 000 | 38 |
+| King's College Hospital | RXH01 | King's College | London | 950 | 140 000 | 72 |
 
-### Génération des profils horaires
+### Génération des profils horaires (8 760 h × 10 sites)
 
 Le script génère **8 760 heures** de données par hôpital en modélisant :
 
@@ -449,117 +183,464 @@ Le script génère **8 760 heures** de données par hôpital en modélisant :
 | **Saisonnalité** | `1.0 + 0.15 × cos(2π(m−1)/12)` | Consommation plus haute en hiver (chauffage UK) |
 | **Week-end** | `× 0.82` si samedi/dimanche | Réduction d'activité |
 | **Bruit** | `N(1.0, 0.05)` | Variabilité stochastique |
-| **Coupures UK** | `P(outage) ≈ 0.0016 × peak_stress × winter_stress` | Fiabilité 99.5%, stress en pic et en hiver |
+| **Coupures UK** | `P(outage) ≈ 0.0016 × peak_stress × winter_stress` | Fiabilité 99.5%, pic en hiver |
 
-**Variables générées par hôpital :**
+Variables générées : `datetime`, `total_load_kw`, `solar_pv_kw`,
+`base_load_kw`, `sterilization_kw`, `is_outage`, `grid_available`,
+`generators_kw`, `site_code`, `site_name`.
 
-| Colonne | Description |
-|---------|-------------|
-| `datetime` | Horodatage horaire (2022) |
-| `total_load_kw` | Consommation horaire (kW) |
-| `solar_pv_kw` | Production solaire si applicable (kW) |
-| `base_load_kw` | Charge de base (kW) |
-| `sterilization_kw` | Stérilisation (kW) |
-| `is_outage` | Indicateur de coupure (0/1) |
-| `grid_available` | Disponibilité réseau (0/1) |
-| `generators_kw` | Production générateur de secours (kW) |
-| `site_code` | Code NHS du site |
-| `site_name` | Nom du site |
+> ⚠️ Le `is_outage` synthétique sur les sites NHS est volontairement très
+> peu fréquent (≈ 0.5 %). En pratique, la cible utile pour l'entraînement
+> reste celle de Lacor.
 
 ---
 
-## 8. Source 7 — Kaggle Hospital Energy
+## 4. Source 3 — NYC LL84 (5 hôpitaux USA)
 
-### Métadonnées
+### Description
+
+**NYC Local Law 84** est une obligation déclarative de la ville de New York
+imposant aux propriétaires de bâtiments > 25 000 ft² de publier leur
+consommation d'énergie annuelle. Le dataset est public sur OpenData NYC
+(`data.cityofnewyork.us`, dataset `5zyy-y8am`, ~120 hôpitaux NYC publiés).
 
 | Attribut | Valeur |
 |----------|--------|
-| **Source** | Kaggle |
-| **Fichier local** | `data/raw/kaggle_hospital/hospital_communication_energy_system.csv` |
-| **Volume** | ~10 000 lignes |
-| **Usage** | Dataset complémentaire |
+| **Source** | OpenData NYC — LL84 Energy & Water Data |
+| **Script** | `src/data/ingest_nyc_ll84.py` |
+| **Répertoire local** | `data/raw/nyc_ll84/` |
+| **Volume** | 8 760 h × 5 sites |
+
+### Hôpitaux référencés (5 sites)
+
+| Site | Code interne | Surface (m²) | Conso annuelle (kWh) |
+|------|--------------|--------------|----------------------|
+| Bellevue Hospital Center | `nyc_bellevue` | 211 475 | 52 960 248 |
+| NYU Langone Tisch Hospital | `nyc_nyu_tisch` | 64 040 | 45 139 152 |
+| NewYork-Presbyterian Brooklyn Methodist | `nyc_nyp_brooklyn` | 126 587 | 32 396 762 |
+| Elmhurst Hospital Center | `nyc_elmhurst` | 89 366 | 30 507 199 |
+| Lincoln Medical Center | `nyc_lincoln` | 110 874 | 31 236 421 |
+
+### Désagrégation horaire
+
+Le script applique un profil horaire NYC-spécifique (climatisation Con
+Edison, pic estival) à la consommation annuelle déclarée pour produire
+8 760 lignes par hôpital. La météo locale (Open-Meteo) est jointe ensuite
+côté app via `load_nyc_features`.
 
 ---
 
-## 9. Schéma de fusion des données
+## 5. Source 4 — Open-Meteo (Archive + Forecast)
+
+### 5.1. Open-Meteo Archive (météo historique)
+
+| Attribut | Valeur |
+|----------|--------|
+| **URL** | `https://archive-api.open-meteo.com/v1/archive` |
+| **Authentification** | Aucune (clé optionnelle) |
+| **Rate limit** | 10 000 requêtes/jour (gratuit) |
+| **Script** | `src/data/ingest_meteo.py` |
+| **Fichier de sortie** | `data/raw/meteo_<hospital_key>.csv` |
+
+13 variables horaires demandées (`METEO_HOURLY_VARS` dans
+`src/utils/config.py`) :
 
 ```
-      Bases hospitalières horaires (Lacor + ERIC NHS + NYC LL84)
-                           │
-                           ▼
-                ┌──────────────────────────┐
-                │  Enrichissement externe  │
-                │  (par hôpital, par heure)│
-                └───────────┬──────────────┘
-                            │
-        ┌───────────────────┼─────────────────────────────────────┐
-        ▼                   ▼                                     ▼
- Open-Meteo (meteo)   Air quality / GDELT / USGS / GDACS   Electricity Maps
-        │                   │                                     │
-        └───────────────────┴─────────────────────────────────────┘
-                            │
-                            ▼
-                 `data/processed/hospital_merged.csv`
-                            │
-                            ▼
-                 `data/features/features_dataset.csv`
-                            │
-                            ▼
-                `src/models/train_baseline.py`
+temperature_2m, relative_humidity_2m, dew_point_2m,
+wind_speed_10m, wind_gusts_10m, precipitation,
+surface_pressure, shortwave_radiation, cloud_cover,
+visibility, et0_fao_evapotranspiration, cape, weathercode
+```
+
+### 5.2. Open-Meteo Forecast (prévisions J+7)
+
+| Attribut | Valeur |
+|----------|--------|
+| **URL** | `https://api.open-meteo.com/v1/forecast` |
+| **Horizon** | `METEO_FORECAST_DAYS = 7` jours |
+| **Script** | `src/data/ingest_openmeteo_forecast.py` |
+| **Fichier de sortie** | `data/raw/meteo_forecast_<hospital_key>.csv` |
+| **Usage** | Onglet « Prévisions J+7 » de l'app Streamlit |
+
+### Sites interrogés
+
+19 sites listés dans `HOSPITAL_LOCATIONS` (lacor + 11 sites Afrique/Asie +
+Phoenix + 5 sites NHS UK). Chaque site est requêté indépendamment, ce qui
+fait un fichier `meteo_<hospital_key>.csv` par hôpital.
+
+### Fusion avec les données de consommation
+
+Côté preprocessing, la jointure se fait par hôpital sur l'horodatage
+exact (résolution horaire alignée). Côté app (mode live / forecast), la
+jointure se fait via `pd.merge_asof` avec une tolérance de 24 h.
+
+---
+
+## 6. Source 5 — Open-Meteo Air Quality
+
+| Attribut | Valeur |
+|----------|--------|
+| **URL** | `https://air-quality-api.open-meteo.com/v1/air-quality` |
+| **Authentification** | Aucune |
+| **Granularité** | Horaire |
+| **Script** | `src/data/ingest_air_quality.py` |
+| **Fichier de sortie** | `data/raw/air_quality_<hospital_key>.csv` |
+
+Variables (`AIR_QUALITY_VARS`) :
+
+| Variable | Unité | Description |
+|----------|-------|-------------|
+| `pm10` | µg/m³ | Particules fines PM10 |
+| `pm2_5` | µg/m³ | Particules fines PM2.5 |
+| `carbon_monoxide` | µg/m³ | CO |
+| `nitrogen_dioxide` | µg/m³ | NO₂ |
+| `sulphur_dioxide` | µg/m³ | SO₂ |
+| `ozone` | µg/m³ | O₃ |
+| `dust` | µg/m³ | Poussières (utile pour Lacor en saison sèche) |
+| `uv_index` | — | Indice UV |
+| `european_aqi` | — | AQI européen agrégé |
+
+Les colonnes finales sont préfixées `air_*` après preprocessing
+(`air_pm2_5`, `air_pm10`, …).
+
+---
+
+## 7. Source 6 — USGS Earthquake Catalog
+
+| Attribut | Valeur |
+|----------|--------|
+| **URL** | `https://earthquake.usgs.gov/fdsnws/event/1/query` |
+| **Authentification** | Aucune |
+| **Rayon de recherche** | 500 km autour de l'hôpital (`USGS_SEARCH_RADIUS_KM`) |
+| **Magnitude minimale** | 3.0 (`USGS_MIN_MAGNITUDE`) |
+| **Script** | `src/data/ingest_usgs_earthquake.py` |
+| **Fichier de sortie** | `data/raw/usgs_earthquake_<hospital_key>.csv` |
+
+Toutes les zones de `HOSPITAL_LOCATIONS` sont interrogées. Les colonnes
+finales sont préfixées `eq_*` (`eq_stress`, `eq_max_mag_24h`,
+`eq_distance_min_km`, `eq_recent_count_24h`, …).
+
+---
+
+## 8. Source 7 — GDACS (catastrophes)
+
+API publique sans clé, gérée conjointement par l'UE (JRC) et l'OCHA.
+
+| Attribut | Valeur |
+|----------|--------|
+| **URL** | `https://www.gdacs.org/gdacsapi/api/events/geteventlist/SEARCH` |
+| **Authentification** | Aucune |
+| **Couverture** | Mondiale, sites filtrés via `GDACS_FILTERS` (code ISO3) |
+| **Script** | `src/data/ingest_gdacs.py` |
+| **Fichier de sortie** | `data/raw/gdacs_<hospital_key>.csv` |
+
+Mapping niveau d'alerte → score numérique (`GDACS_ALERT_SCORE`) :
+
+| Niveau | Score |
+|--------|-------|
+| Green | 1.0 |
+| Orange | 2.0 |
+| Red | 3.0 |
+
+Types d'événements (`GDACS_EVENT_TYPES`) : flood, cyclone, earthquake,
+volcano, drought, wildfire, tsunami. Les colonnes finales sont préfixées
+`gdacs_*`.
+
+Sites couverts : tous les hôpitaux d'Afrique + Asie + Phoenix + NHS UK
+(les NHS n'ont en pratique que peu d'alertes Orange/Red).
+
+---
+
+## 9. Source 8 — GDELT DOC 2.0 (signal médiatique)
+
+| Attribut | Valeur |
+|----------|--------|
+| **URL** | `https://api.gdeltproject.org/api/v2/doc/doc` |
+| **Authentification** | Aucune |
+| **Granularité** | Quotidien (puis interpolé en horaire) |
+| **Script** | `src/data/ingest_gdelt.py` |
+| **Fichier de sortie** | `data/raw/gdelt_<hospital_key>.csv` |
+
+### Sites configurés (`GDELT_QUERIES`)
+
+Seuls **2 hôpitaux** ont des requêtes thématiques codées : **Lacor**
+(Ouganda) et **Phoenix** (Arizona). Pour les autres sites, les colonnes
+GDELT n'existent pas dans le dataset final.
+
+### 4 thèmes par site
+
+| Thème | Description | Exemple Lacor |
+|-------|-------------|----------------|
+| `power` | Coupures, délestage, problèmes réseau | `(uganda OR gulu) (blackout OR "power outage" OR UMEME OR "load shedding")` |
+| `weather` | Événements météo extrêmes | `(uganda OR gulu) (storm OR flood OR "heavy rain" OR lightning)` |
+| `health` | Surcharge urgences, crises sanitaires | `(uganda OR gulu) (hospital OR clinic) (emergency OR crisis OR disruption)` |
+| `disaster` | Épidémies, catastrophes, déplacés | `(uganda OR gulu) (epidemic OR outbreak OR ebola OR refugee)` |
+
+Les colonnes finales sont préfixées `gdelt_<theme>_*` (`gdelt_power_vol`,
+`gdelt_power_tone`, `gdelt_power_vol_7d`, `gdelt_power_anomaly`,
+`gdelt_power_stress`, …).
+
+---
+
+## 10. Source 9 — NOAA Storm Events (USA)
+
+| Attribut | Valeur |
+|----------|--------|
+| **URL** | `https://www.ncei.noaa.gov/pub/data/swdi/stormevents/csvfiles/` |
+| **Authentification** | Aucune |
+| **Cache local** | `data/raw/noaa_storm/` |
+| **Script** | `src/data/ingest_noaa_storm.py` |
+
+### Sites filtrés (`NOAA_STORM_FILTERS`)
+
+Seul **Phoenix (Arizona, comté Maricopa)** est filtré. Tous les autres sites
+ne reçoivent pas de signal NOAA (les colonnes `storm_*` sont absentes ou à
+0).
+
+### Catégories d'événements (`NOAA_STORM_EVENT_GROUPS`)
+
+| Groupe | Types d'événements |
+|--------|---------------------|
+| `thunderstorm` | Thunderstorm Wind, Lightning, Tornado, Hail |
+| `flood` | Flood, Flash Flood, Heavy Rain |
+| `wind` | High Wind, Strong Wind |
+| `heat` | Heat, Excessive Heat |
+| `winter` | Winter Storm, Ice Storm, Blizzard, Heavy Snow |
+| `dust` | Dust Storm, Dust Devil |
+
+Les colonnes finales sont préfixées `storm_*` (`storm_active`,
+`storm_event_count`, `storm_active_6h`, `storm_active_24h`,
+`storm_count_24h`, `storm_magnitude_max`, etc.).
+
+---
+
+## 11. Source 10 — Electricity Maps (réseau local)
+
+API commerciale (token gratuit pour usage perso/recherche, payant pour
+usage pro). Couverture mondiale, granularité horaire.
+
+| Attribut | Valeur |
+|----------|--------|
+| **URL** | `https://api.electricitymap.org` |
+| **Token** | Variable d'env. `ELECTRICITY_MAPS_TOKEN` |
+| **Script** | `src/data/ingest_electricitymaps.py` (`run` train + `run_live` live) |
+| **Fichier de sortie** | `data/raw/electricitymaps_<hospital_key>.csv` |
+
+### Endpoints exploités
+
+| Endpoint | Usage |
+|----------|-------|
+| `/v4/zone` | Résolution lat/lon → zone réseau |
+| `/v4/total-load/latest` | Charge totale instantanée (MW) |
+| `/v4/total-load/history` | Charge horaire des 24 dernières heures |
+| `/v4/carbon-intensity/latest` | Intensité carbone (gCO₂/kWh) |
+| `/v4/carbon-intensity/history` | Intensité carbone horaire 24 h |
+| `/v4/electricity-mix/history` | Mix de production (renouv. / fossile) |
+
+### Mapping zone par hôpital (`HOSPITAL_ELECTRICITY_ZONES`)
+
+| Hôpital | Zone Electricity Maps |
+|---------|------------------------|
+| Lacor | `UG` |
+| Phoenix | `US-SW-AZPS` (Arizona Public Service) |
+| Kenyatta | `KE` |
+| Tikur Anbessa | `ET` |
+| Groote Schuur | `ZA` |
+| Dhaka | `BD` |
+| Fann | `SN` |
+| Parirenyatwa | `ZW` |
+| Muhimbili | `TZ` |
+| LUTH | `NG` |
+| Korle Bu | `GH` |
+| Ibn Sina | `MA` |
+| Kasr Al Ainy | `EG` |
+| CHUK | `RW` |
+| NHS UK (5 sites) | `GB` |
+
+> Les sites NYC LL84 ne sont pas dans `HOSPITAL_ELECTRICITY_ZONES` et
+> n'ont donc pas de fichier `electricitymaps_*.csv`. L'app gère ce cas en
+> affichant un message « Electricity Maps non disponible ».
+
+### Colonnes finales
+
+Préfixées `em_*` :
+
+| Colonne | Description |
+|---------|-------------|
+| `em_zone` | Code zone (string) |
+| `em_total_load_mw` | Charge totale instantanée (MW) |
+| `em_carbon_intensity_gco2_kwh` | Intensité carbone (gCO₂/kWh) |
+| `em_renewable_pct` | % renouvelable du mix |
+| `em_fossil_pct` | % fossile du mix |
+| `em_low_carbon_pct` | % bas carbone |
+
+Le bandeau temps réel de l'app (« État réseau local ») affiche les 24 h
+glissantes : MW courants, stress vs moyenne 24 h, intensité carbone, mix.
+Il propose aussi une **estimation de la conso hôpital** :
+
+```
+hospital_load_kw_est = avg_load_kw × (em_total_load_mw_now / em_total_load_mw_avg_24h)
+```
+
+---
+
+## 12. Schéma de fusion des données
+
+```
+        Bases hospitalières horaires (Lacor + ERIC NHS + NYC LL84)
+                                │
+                                ▼
+                    ┌───────────────────────────────┐
+                    │ Enrichissement externe        │
+                    │ (par hôpital, par horodatage) │
+                    └───────────────┬───────────────┘
+                                    │
+   ┌──────────────┬─────────────┬───┴───┬─────────────┬──────────────┐
+   ▼              ▼             ▼       ▼             ▼              ▼
+Open-Meteo   Air Quality      USGS    GDACS        GDELT       Electricity
+(historique)                                       (Lacor /        Maps
+                                                   Phoenix)
+                                                   + NOAA
+                                                   (Phoenix)
+   └──────────────┴─────────────┴───────┴─────────────┴──────────────┘
+                                    │
+                                    ▼
+                  `data/processed/hospital_merged.csv`
+                                    │
+                                    ▼
+                  `data/features/features_dataset.csv`
+                                    │
+                                    ▼
+                       `src/models/train_baseline.py`
+                                    │
+                                    ▼
+                        `models/calibrated_rf.joblib`
 ```
 
 ### Types de jointure
 
 | Jointure | Type | Clé | Tolérance |
 |----------|------|-----|-----------|
-| Consommation + Météo | `merge_asof` (temporel) | `datetime` | ±1 heure |
-| + OMS | Jointure statique | `country_code` | — |
-| + Load shedding | Agrégation → valeurs constantes | — | — |
+| Lacor (15 min) → horaire | Resample temporel | `datetime` | — |
+| Hôpital + Météo / Air / EM | `merge` exact (puis fallback `merge_asof`) | `(hospital, datetime)` | ±1 h |
+| Hôpital + GDELT (quotidien) | Forward-fill jour → heures | `(hospital, date)` | — |
+| Hôpital + GDACS / USGS / NOAA | Agrégation événementielle horaire | `(hospital, datetime)` | — |
+
+### Volumétrie indicative
+
+| Source | Lignes | Hôpitaux concernés |
+|--------|--------|---------------------|
+| Lacor (horaire) | 8 760 | 1 |
+| ERIC NHS (horaire) | 87 600 | 10 |
+| NYC LL84 (horaire) | 43 800 | 5 |
+| **Dataset final fusionné** | **~140 160** | **16 hôpitaux temps réel** |
+
+Le nombre de colonnes du dataset final dépend des sources disponibles au
+moment du run (≈ 130-140 colonnes typiquement). Le nombre exact de features
+utilisées par le modèle est calculé dynamiquement par `train_baseline.py`
+(voir `prepare_data` + `COLS_TO_DROP`).
 
 ---
 
-## 10. Dictionnaire des variables
+## 13. Dictionnaire des variables
 
 ### Variables brutes (après preprocessing)
 
 | Variable | Source | Type | Unité | Description |
 |----------|--------|------|-------|-------------|
-| `datetime` | Lacor | datetime | — | Horodatage horaire |
-| `total_load_kw` | Lacor | float | kW | Consommation totale |
-| `solar_pv_kw` | Lacor | float | kW | Production solaire |
+| `datetime` | toutes | datetime | — | Horodatage horaire |
+| `hospital` | toutes | string | — | Clé hôpital (`lacor_uganda`, `st_thomas_nhs`, …) |
+| `total_load_kw` | Lacor / ERIC / NYC | float | kW | Consommation totale |
+| `solar_pv_kw` | Lacor / ERIC | float | kW | Production solaire |
 | `generators_kw` | Lacor | float | kW | Production générateurs |
-| `sterilization_kw` | Lacor | float | kW | Consommation stérilisation |
-| `base_load_kw` | Lacor | float | kW | Charge de base |
+| `sterilization_kw` | Lacor / ERIC | float | kW | Consommation stérilisation |
+| `base_load_kw` | Lacor / ERIC / NYC | float | kW | Charge de base |
 | `grid_availability_ratio` | Lacor | float | [0,1] | Fraction de l'heure avec réseau |
-| `is_outage` | Lacor | int | 0/1 | **Variable cible** |
+| `is_outage` | Lacor (réelle) / ERIC (synthétique) | int | 0/1 | **Variable cible** |
 | `temperature_2m` | Open-Meteo | float | °C | Température |
-| `relative_humidity_2m` | Open-Meteo | float | % | Humidité |
-| `wind_speed_10m` | Open-Meteo | float | km/h | Vent |
+| `relative_humidity_2m` | Open-Meteo | float | % | Humidité relative |
+| `dew_point_2m` | Open-Meteo | float | °C | Point de rosée |
+| `wind_speed_10m` | Open-Meteo | float | km/h | Vent à 10 m |
+| `wind_gusts_10m` | Open-Meteo | float | km/h | Rafales à 10 m |
 | `precipitation` | Open-Meteo | float | mm | Précipitations |
-| `surface_pressure` | Open-Meteo | float | hPa | Pression |
+| `surface_pressure` | Open-Meteo | float | hPa | Pression au sol |
 | `shortwave_radiation` | Open-Meteo | float | W/m² | Rayonnement solaire |
-| `who_reliability_pct` | OMS | float | % | Fiabilité OMS du pays |
-| `loadshed_avg_stage` | Eskom | float | — | Niveau moyen de load shedding |
-| `loadshed_max_stage` | Eskom | int | — | Niveau max de load shedding |
-| `loadshed_pct_active` | Eskom | float | [0,1] | % du temps en load shedding |
+| `cloud_cover` | Open-Meteo | float | % | Couverture nuageuse |
+| `visibility` | Open-Meteo | float | m | Visibilité |
+| `et0_fao_evapotranspiration` | Open-Meteo | float | mm | Évapotranspiration FAO |
+| `cape` | Open-Meteo | float | J/kg | Énergie convective |
+| `weathercode` | Open-Meteo | int | — | Code météo WMO |
+| `air_pm2_5`, `air_pm10`, `air_ozone`, … | Air Quality | float | µg/m³ | Pollution |
+| `air_european_aqi`, `air_uv_index` | Air Quality | float | — | Index agrégés |
+| `eq_*` | USGS | float | mixte | Stress sismique (24 h, 7 j, max mag…) |
+| `gdacs_*` | GDACS | mixte | — | Score d'alerte, type, durée |
+| `gdelt_*` | GDELT | mixte | — | Volume / tonalité / anomalie / stress par thème |
+| `storm_*` | NOAA | mixte | — | Tempêtes USA (Phoenix uniquement) |
+| `em_*` | Electricity Maps | mixte | — | Charge MW, mix, carbone |
 
-### Variables dérivées (features)
+### Variables dérivées (features engineering)
 
-→ Voir la documentation `DOCUMENTATION_MODELE_ET_PREDICTIONS.md` pour le détail des features réellement utilisées à l'entraînement (liste calculée dynamiquement via `COLS_TO_DROP` dans `src/models/train_baseline.py`).
+→ Voir [`DOCUMENTATION_MODELE_ET_PREDICTIONS.md`](DOCUMENTATION_MODELE_ET_PREDICTIONS.md) pour le détail des
+features réellement utilisées à l'entraînement (liste calculée
+dynamiquement via `COLS_TO_DROP` dans `src/models/train_baseline.py`).
 
 ---
 
-## 11. Résumé des volumétries
+## 14. Modes train / live et fenêtres temporelles
 
-| Source | Lignes brutes | Lignes après traitement | Colonnes | Poids |
-|--------|---------------|------------------------|----------|-------|
-| Lacor Hospital | 35 040 | 8 760 | 8 | ~3.5 Mo |
-| Phoenix Hospital | 8 760 | 8 760 | 8 | ~1.2 Mo |
-| Open-Meteo Lacor | 8 760 | 8 760 | 7 | ~0.8 Mo |
-| OMS Fiabilité | 39 | 39 | 6 | ~4 Ko |
-| OMS Pays | ~200 | ~200 | 4 | ~15 Ko |
-| Eskom Production | 43 824 | 43 824 | 10 | ~5 Mo |
-| EskomSePush | 670 | 670 | 2 | ~12 Ko |
-| ERIC NHS (résumé) | 10 | 10 | 21 | ~3 Ko |
-| ERIC NHS (horaire) | 87 600 | 87 600 | 10/site | ~80 Mo |
-| **Dataset final (courant)** | — | **~140 160** | **~138** (variable selon sources dispo) | **multi-Mo** |
+`run_pipeline.py` expose deux modes :
+
+### Mode `train` (défaut)
+
+```bash
+python run_pipeline.py
+# ou explicite
+python run_pipeline.py --mode train
+```
+
+- Météo Open-Meteo : année 2022 entière
+- Air Quality : année 2022 entière
+- USGS / GDACS / GDELT / NOAA : année 2022
+- Electricity Maps : ingestion historique complète (`run`)
+
+### Mode `live`
+
+```bash
+python run_pipeline.py --mode live --window-days 30
+```
+
+- Météo Open-Meteo : `[today − window_days, today]`
+- Air Quality : idem
+- USGS / GDACS : `[today − window_days, today]` (datetime UTC)
+- GDELT / NOAA : année courante (`datetime.now().year`)
+- Electricity Maps : appel `run_live(window_hours = window_days × 24)`
+- L'ingestion de consommation Lacor reste sur le fichier 2022 (pas de
+  flux temps réel public pour cet hôpital).
+
+### Note importante
+
+Le système n'est **pas** un flux streaming strict. Il fonctionne en :
+
+- **train** : données historiques (principalement 2022)
+- **live** : fenêtre glissante récente avec rafraîchissement par appels API
+
+On parle donc de **quasi temps réel / near real-time** : données récentes
+agrégées par pas horaire, pas de streaming continu seconde par seconde.
+
+---
+
+## 15. Sources historiques retirées du pipeline
+
+Trois sources mentionnées dans les premières versions du projet
+**ne sont plus actives** dans la run courante :
+
+| Source | Statut | Raison |
+|--------|--------|--------|
+| **OMS / WHO GHO** (`HCF_REL_ELECTRICITY`) | ❌ Plus ingérée par `run_pipeline.py` | La fiabilité OMS est désormais utilisée uniquement comme paramètre statique de l'app (`adjust_for_hospital_profile`) |
+| **Eskom / EskomSePush** | ❌ Plus ingérée | Couverture limitée à l'Afrique du Sud, remplacée par Electricity Maps + GDACS qui couvrent toutes les zones |
+| **Phoenix Hospital** (Excel github) | ❌ Plus ingéré comme source de consommation | Aucune cible `is_outage`, profils trop éloignés des sites de production. Phoenix reste référencé dans `HOSPITAL_LOCATIONS` pour les ingestions géo (Open-Meteo, USGS, GDACS, GDELT, NOAA) |
+| **Kaggle Hospital Energy** | ❌ Jamais branché en production | Reste disponible localement à titre exploratoire (`data/raw/kaggle_hospital/`) |
+
+Les fichiers historiques (`data/raw/who_reliability.csv`,
+`data/raw/sa_electricity/*`) restent sur disque à titre de traçabilité,
+mais ne sont plus chargés par `preprocessing.py`.

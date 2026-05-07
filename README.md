@@ -75,12 +75,23 @@ pip install -r requirements.txt
 ## Exécution
 
 ```bash
-# Pipeline complet (ingestion → features → entraînement + SHAP)
+# Pipeline complet (ingestion historique 2022 → features → entraînement + SHAP)
 python run_pipeline.py
+
+# Pipeline en mode "live" (fenêtre glissante récente, par défaut 30 jours)
+python run_pipeline.py --mode live --window-days 30
+
+# Pipeline rapide pour itération (CV réduit, grille compacte, SHAP échantillonné)
+python run_pipeline.py --fast
+
+# Tuning fin (override CV folds, taille SHAP, taille de grille…)
+python run_pipeline.py --grid-scale compact --cv-folds 3 --shap-sample-size 2000
 
 # Interface Streamlit
 streamlit run app.py
 ```
+
+Tous les flags CLI sont définis dans `run_pipeline.py` (`--mode {train,live}`, `--window-days`, `--fast`, `--grid-scale {compact,full}`, `--cv-folds`, `--shap-sample-size`, `--no-full-artifacts`).
 
 ## Pipeline d'entraînement
 
@@ -101,11 +112,16 @@ streamlit run app.py
 
 Les métriques exactes du run courant sont écrites par `train_baseline.py` dans `models/training_summary.json` (modèle gagnant, hyperparamètres, F1 CV, accuracy, precision, recall, ROC AUC, Brier brut + calibré).
 
+**Run courante** (`models/training_summary.json`) :
+- **Modèle gagnant : LightGBM** (`n_estimators=300`, `max_depth=-1`, `learning_rate=0.05`, `scale_pos_weight=15`, `subsample=0.8`, `colsample_bytree=0.8`)
+- Hold-out test (brut)    : F1 = 0.85 · ROC AUC = 0.999 · Brier = 0.0014 · Precision = 0.86 · Recall = 0.84
+- Hold-out test (calibré) : F1 = 0.88 · ROC AUC = 0.9996 · Brier = 0.0015 · Precision = 0.95 · Recall = 0.82
+
 Les classements de features sont disponibles ici :
 - `models/feature_importance.csv` — importance MDI du modèle gagnant
 - `models/shap_feature_importance.csv` — importance SHAP globale (|mean|)
 
-Le modèle calibré (`calibrated_rf.joblib`) produit des probabilités fiables (calibration isotonique sur 3 folds temporels). C'est lui qui est chargé par défaut dans l'app.
+Le modèle calibré (`calibrated_rf.joblib`) produit des probabilités fiables (calibration isotonique sur 3 folds temporels). C'est lui qui est chargé par défaut dans l'app. Le nom de fichier `calibrated_rf.joblib` est conservé pour rétro-compatibilité, mais il contient bien le **gagnant** courant (LightGBM dans la run actuelle).
 
 ## Sources de données
 
@@ -130,14 +146,18 @@ Les données [ERIC (Estates Returns Information Collection)](https://digital.nhs
 ## Interface Streamlit
 
 L'application [app.py](app.py) propose :
-- **28 hôpitaux** sélectionnables (Afrique, Asie, UK, USA), filtrables sur les sources réelles uniquement (Lacor + ERIC + NYC)
-- **Prédiction en temps réel** : analyse des 72 dernières heures avec waterfall SHAP local
-- **Mode prévisionnel** : trajectoire de risque sur 7 jours via Open-Meteo Forecast
-- **Simulation manuelle** : scénario personnalisé avec explications SHAP locales
-- **Ajustement par profil** : adaptation au réseau électrique de chaque hôpital (fiabilité estimée + stabilité du réseau)
+- **28 hôpitaux** sélectionnables (Afrique, Asie, UK, USA), filtrables sur les sources réelles uniquement (Lacor + ERIC + NYC) via la bascule « Données réelles uniquement »
+- **Bandeau réseau temps réel** (Electricity Maps) par hôpital : zone, charge MW, intensité carbone, mix renouvelable/fossile, conso hôpital estimée
+- **Onglet 1 — Prédiction historique** : période d'analyse au choix (7 presets : 72 h, mois, saisons, année 2022) et probabilité par heure + SHAP waterfall local
+- **Onglet 2 — Prévisions J+7** : trajectoire de risque heure par heure sur 7 jours via Open-Meteo Forecast (presets : seuils 50% / 70%, top 5 heures critiques, synthèse par jour)
+- **Onglet 3 — Simulation manuelle** : 13 paramètres (3 temporel · 4 énergie · 6 météo) + jauge de risque + waterfall SHAP + comparaison aux conditions moyennes
+- **Ajustement par profil** : adaptation au réseau électrique de chaque hôpital (fiabilité OMS estimée + stabilité du réseau, voir `adjust_for_hospital_profile`)
+- **Garde-fou features** : détection automatique d'une désynchronisation entre le dataset (`features_dataset.csv`) et le modèle entraîné (`feature_names_in_`)
 - **Gestion d'erreurs** : messages explicatifs si le modèle ou les données sont manquants
 
 ## Hôpitaux couverts
+
+L'app Streamlit propose **28 hôpitaux** ; en mode strict (« Données réelles uniquement », activé par défaut) seuls **16 hôpitaux** sont sélectionnables (Lacor + 10 NHS ERIC + 5 NYC LL84). Les profils `africa_grid` ne sont visibles que lorsque la bascule est désactivée.
 
 | Catégorie | Nb | Hôpitaux |
 |---|---|---|
@@ -146,7 +166,7 @@ L'application [app.py](app.py) propose :
 | NYC LL84 (USA) | 5 | Bellevue, NYU Tisch, NYP Brooklyn Methodist, Elmhurst, Lincoln |
 | Profils estimés `africa_grid` | 12 | Kenyatta, Tikur Anbessa, Groote Schuur, Dhaka, Fann, Parirenyatwa, Muhimbili, LUTH Lagos, Korle Bu, Ibn Sina, Kasr Al Ainy, CHUK Kigali |
 
-Le fichier [src/utils/config.py](src/utils/config.py) référence les coordonnées de 19 sites (`HOSPITAL_LOCATIONS`) utilisés par les ingestions géo-localisées (Open-Meteo, USGS, GDACS, NOAA, GDELT, Electricity Maps).
+Le fichier [src/utils/config.py](src/utils/config.py) référence les coordonnées de 19 sites (`HOSPITAL_LOCATIONS`) utilisés par les ingestions géo-localisées (Open-Meteo, USGS, GDACS, NOAA, GDELT, Electricity Maps). Les profils `africa_grid` clonent le profil temporel de Lacor mis à l'échelle (`avg_load_kw`) puis y injectent météo locale + Electricity Maps.
 
 ## Facteurs utilisés (features)
 
@@ -154,13 +174,17 @@ Le dataset de features contient plus de 100 colonnes numériques ; le modèle ex
 
 Familles de facteurs effectivement utilisées :
 
-- **Charge/énergie** : `total_load_kw`, `solar_pv_kw`, `base_load_kw`, `load_rolling_*`, `solar_ratio`, `peak_ratio`, etc.
-- **Temporels** : `hour`, `day_of_week`, `month`, `is_weekend`, encodages cycliques.
-- **Météo** : température, humidité, vent, pluie, pression, rayonnement + interactions.
-- **Qualité de l'air** : PM2.5, PM10, ozone, poussières, AQI + agrégats temporels.
-- **Sismique / catastrophes** : variables USGS (`eq_*`) et GDACS (`gdacs_*`).
-- **Signal média événementiel** : variables GDELT (`gdelt_*`) pour les sites configurés.
-- **Réseau local** : variables Electricity Maps (`em_*`) selon la zone électrique de l'hôpital.
+- **Charge/énergie** : `total_load_kw`, `solar_pv_kw`, `base_load_kw`, `load_rolling_*`, `load_diff_*`, `solar_ratio`, `peak_ratio`, `base_load_ratio`, etc.
+- **Historique coupures** : `hours_since_last_outage`, `last_outage_duration_h`, `outage_frequency_7d`, `avg_outage_duration_7d`, `outage_trend_7d` (toutes calculées avec un `shift(1)` par hôpital pour éviter le leakage)
+- **Temporels** : `hour`, `day_of_week`, `month`, `is_weekend`, `is_public_holiday`, encodages cycliques (`hour_sin/cos`, `month_sin/cos`)
+- **Météo** : température, humidité, point de rosée, vent (vitesse + rafales), pluie, pression, rayonnement, CAPE, weathercode + interactions (`temp_humidity_interaction`, `wind_precipitation_interaction`, `heat_stress`, `solar_available`)
+- **Météo avancée** : `cloud_cover_pct`, `visibility_m`, `evapotranspiration`, `rain_intensity`, `thermal_amplitude_24h`, `humidity_change_3h`, `pressure_change_3h`
+- **Qualité de l'air** : PM2.5, PM10, ozone, NO₂, SO₂, CO, dust, UV, AQI européen + moyennes 6 h / 24 h + indicateurs (`air_pollution_high`, `air_dust_storm`, `air_heat_pollution_stress`)
+- **Sismique** : variables USGS `eq_*` (`eq_stress`, cumul 24 h / 7 j, magnitude max, distance min, événement majeur)
+- **Catastrophes** : variables GDACS `gdacs_*` (alerte 24 h / 7 j, type de catastrophe, combo tempête × catastrophe)
+- **Tempêtes (USA)** : variables NOAA `storm_*` (orage, inondation, vent, chaleur, hiver, poussière)
+- **Signal média événementiel** : variables GDELT `gdelt_*` (4 thèmes × volume / tonalité / anomalie / stress) pour les sites configurés (Lacor, Phoenix)
+- **Réseau local** : variables Electricity Maps `em_*` (zone, charge MW, intensité carbone gCO₂/kWh, % renouvelable / fossile / bas carbone)
 
 ### Disponibilité des sources selon hôpital
 
