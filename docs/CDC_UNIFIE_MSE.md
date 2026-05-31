@@ -153,7 +153,7 @@ Creer un **systeme de stockage energetique** adapte a des facteurs multi-critere
 
 - Dataset fusionne preprocess (`data/processed/...`).
 - Dataset features (`data/features/features_dataset.csv`).
-- Modeles sauvegardes (`models/baseline_rf.joblib`, `models/calibrated_rf.joblib`).
+- Modeles sauvegardes (`models/baseline_model.joblib`, `models/calibrated_model.joblib`).
 - Explicabilite (`models/shap_explainer.joblib`, `models/shap_values.npz`).
 - Fichiers de synthese (`models/model_comparison.csv`, `models/training_summary.json`).
 - Dossier de dimensionnement (note de calcul, hypotheses, resultats).

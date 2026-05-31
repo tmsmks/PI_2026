@@ -12,7 +12,7 @@ Script principal : exécute le pipeline complet de bout en bout.
 
 import logging
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 import argparse
 from time import perf_counter
 
@@ -37,6 +37,8 @@ def main(
     cv_folds: int | None = None,
     shap_sample_size: int | None = None,
     save_full_artifacts: bool = True,
+    scope: str = "real",
+    calibration_method: str = "auto",
 ):
     setup_logging()
     logger.info("=" * 60)
@@ -124,7 +126,7 @@ def main(
     try:
         from src.data.ingest_usgs_earthquake import run as ingest_usgs
         if mode == "live":
-            end_dt = datetime.utcnow()
+            end_dt = datetime.now(timezone.utc)
             start_dt = end_dt - timedelta(days=window_days)
             _run_timed("Ingestion USGS", ingest_usgs, year=None, start=start_dt, end=end_dt)
         else:
@@ -136,7 +138,7 @@ def main(
     try:
         from src.data.ingest_gdacs import run as ingest_gdacs
         if mode == "live":
-            end_dt = datetime.utcnow()
+            end_dt = datetime.now(timezone.utc)
             start_dt = end_dt - timedelta(days=window_days)
             _run_timed("Ingestion GDACS", ingest_gdacs, year=None, start=start_dt, end=end_dt)
         else:
@@ -184,6 +186,8 @@ def main(
         cv_folds=cv_folds,
         shap_sample_size=shap_sample_size,
         save_full_artifacts=save_full_artifacts,
+        scope=scope,
+        calibration_method=calibration_method,
     )
 
     logger.info("\n" + "=" * 60)
@@ -233,6 +237,28 @@ if __name__ == "__main__":
         action="store_true",
         help="Ne sauvegarde pas les artefacts lourds (explainer/joblib SHAP).",
     )
+    parser.add_argument(
+        "--scope",
+        choices=["real", "all"],
+        default="real",
+        help=(
+            "Portée d'entraînement. real (défaut) = uniquement les hôpitaux à "
+            "coupures réellement observées (Lacor) → métriques honnêtes. "
+            "all = multi-hôpitaux complet, inclut des coupures synthétiques "
+            "(ERIC/NYC) qui biaisent le F1 global."
+        ),
+    )
+    parser.add_argument(
+        "--calibration",
+        choices=["auto", "none", "isotonic", "sigmoid"],
+        default="auto",
+        help=(
+            "Méthode de calibration. auto (défaut) = choisit none/isotonic/"
+            "sigmoid selon le Brier sur une validation interne (un GBM est "
+            "souvent déjà bien calibré → 'none' gagne sur petit jeu). "
+            "none/isotonic/sigmoid = forcer."
+        ),
+    )
     args = parser.parse_args()
     main(
         mode=args.mode,
@@ -242,4 +268,6 @@ if __name__ == "__main__":
         cv_folds=args.cv_folds,
         shap_sample_size=args.shap_sample_size,
         save_full_artifacts=not args.no_full_artifacts,
+        scope=args.scope,
+        calibration_method=args.calibration,
     )

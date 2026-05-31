@@ -49,13 +49,20 @@ def run(
     end_date: str = "2022-12-31",
 ) -> None:
     """Récupère la météo historique sur une plage de dates."""
+    # try/except par hôpital : un seul timeout Open-Meteo ne doit pas
+    # casser l'ingestion des 18 autres sites (cohérence avec les autres
+    # ingesters comme ingest_air_quality).
     for name, coords in HOSPITAL_LOCATIONS.items():
-        df = fetch_meteo_archive(
-            lat=coords["lat"],
-            lon=coords["lon"],
-            start_date=start_date,
-            end_date=end_date,
-        )
+        try:
+            df = fetch_meteo_archive(
+                lat=coords["lat"],
+                lon=coords["lon"],
+                start_date=start_date,
+                end_date=end_date,
+            )
+        except Exception as exc:
+            logger.warning("Météo %s : échec (%s)", name, exc)
+            continue
         df["hospital"] = name
         save_csv(df, RAW_DIR / f"meteo_{name}.csv")
 

@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 
 from src.utils.config import RAW_DIR, PROCESSED_DIR
-from src.utils.io import load_csv, save_csv
+from src.utils.io import load_csv, save_csv, save_table
 
 logger = logging.getLogger(__name__)
 
@@ -99,8 +99,12 @@ def merge_with_meteo(consumption: pd.DataFrame, meteo: pd.DataFrame) -> pd.DataF
 
     n_missing = merged[meteo_cols].isnull().sum().sum()
     if n_missing > 0:
-        logger.warning("%d cellules météo sans correspondance → interpolation", n_missing)
-        merged[meteo_cols] = merged[meteo_cols].interpolate(method="linear").ffill().bfill()
+        logger.warning("%d cellules météo sans correspondance → ffill causal", n_missing)
+        # ffill (report de la dernière valeur connue) plutôt qu'interpolate/bfill
+        # qui utilisent des valeurs FUTURES → fuite temporelle (#5). Les NaN de
+        # début de série (aucune valeur passée) sont mis à 0, neutre et cohérent
+        # avec le fillna(0) final de build_features.
+        merged[meteo_cols] = merged[meteo_cols].ffill().fillna(0.0)
 
     logger.info("Fusion météo : %d colonnes ajoutées (%s)", len(meteo_cols), meteo_cols)
     return merged
@@ -329,12 +333,16 @@ def run() -> None:
         enriched = enrich_one_hospital(base, hospital)
 
         numeric_cols = enriched.select_dtypes(include=[np.number]).columns
-        n_missing = enriched[numeric_cols].isnull().sum().sum()
+        # Ne JAMAIS imputer la cible : un NaN sur is_outage est un problème de
+        # données à laisser visible, pas à combler (le combler fuiterait la
+        # cible). On l'exclut donc de l'imputation.
+        impute_cols = [c for c in numeric_cols if c != "is_outage"]
+        n_missing = enriched[impute_cols].isnull().sum().sum()
         if n_missing > 0:
-            logger.warning("%d valeurs manquantes pour %s → interpolation", n_missing, hospital)
-            enriched[numeric_cols] = (
-                enriched[numeric_cols].interpolate(method="linear").ffill().bfill()
-            )
+            logger.warning("%d valeurs manquantes pour %s → ffill causal", n_missing, hospital)
+            # ffill causal au lieu d'interpolate/bfill (qui regardent le futur,
+            # #5). NaN de début de série → 0 (cohérent avec build_features).
+            enriched[impute_cols] = enriched[impute_cols].ffill().fillna(0.0)
 
         enriched_frames.append(enriched)
         logger.info("  ✓ %s enrichi en %.2fs", hospital, perf_counter() - loop_start)
@@ -343,7 +351,7 @@ def run() -> None:
     merged_all["datetime"] = pd.to_datetime(merged_all["datetime"])
     merged_all = merged_all.sort_values(["datetime", "hospital"]).reset_index(drop=True)
 
-    save_csv(merged_all, PROCESSED_DIR / "hospital_merged.csv")
+    save_table(merged_all, PROCESSED_DIR / "hospital_merged.csv")
     logger.info(
         "Preprocessing multi-hôpitaux terminé : %d lignes, %d colonnes, %d hôpitaux, coupures=%.2f%%",
         len(merged_all),

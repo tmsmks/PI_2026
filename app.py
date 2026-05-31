@@ -13,13 +13,24 @@ import joblib
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-import shap
 import streamlit as st
+
+# `shap` est chargé à la demande (~150 MB de C extensions). Il est utilisé
+# uniquement par `compute_shap_local` et `load_shap_explainer` : déférer
+# l'import accélère le cold start Streamlit.
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
-from src.utils.config import FEATURES_DIR, MODELS_DIR
+from src.utils.config import (
+    COLS_TO_DROP,
+    EXTERNAL_SIGNAL_PREFIXES,
+    FEATURES_DIR,
+    MODELS_DIR,
+    UGANDA_PUBLIC_HOLIDAYS_2022,
+    drop_external_signal_columns,
+)
+from src.utils.hospitals import HOSPITAL_DISPLAY as _HOSPITAL_DISPLAY_FULL
 
 # ── Configuration ────────────────────────────────────────────────────
 
@@ -29,407 +40,12 @@ st.set_page_config(
     layout="wide",
 )
 
-COLS_TO_DROP = [
-    "datetime",
-    "is_outage",
-    "grid_availability_ratio",
-    "generators_kw",
-    "generator_active",
-    "generator_ratio",
-    "grid_availability_rolling_6h",
-    "recent_outages_6h",
-    "recent_outages_24h",
-    "storm_risk",
-    "cloud_cover",
-    "visibility",
-    "et0_fao_evapotranspiration",
-]
-
+# HOSPITAL_DISPLAY est centralisé dans src/utils/hospitals.py.
+# On filtre ici les hôpitaux marqués `ui_hidden` pour ne garder que
+# ceux pertinents pour l app (Phoenix est un site benchmark interne).
 HOSPITAL_DISPLAY = {
-    "lacor_uganda": {
-        "name": "Lacor Hospital",
-        "location": "Gulu, Ouganda",
-        "flag": "🇺🇬",
-        "beds": 482,
-        "type": "Hôpital général (PNL)",
-        "who_reliability": 50.0,
-        "lat": 2.77, "lon": 32.30,
-        "avg_load_kw": 133, "max_load_kw": 235,
-        "has_solar": True, "has_generator": True,
-        "grid_stability": "faible",
-    },
-    # ── Hôpitaux africains (réseau temps réel via Electricity Maps) ──
-    # data_source = africa_grid : profil Lacor mis à l'échelle par
-    # avg_load_kw, météo Open-Meteo locale, et Electricity Maps live.
-    "kenyatta_kenya": {
-        "name": "Kenyatta National Hospital",
-        "location": "Nairobi, Kenya",
-        "flag": "🇰🇪",
-        "beds": 1800,
-        "type": "Hôpital de référence national",
-        "who_reliability": 65.0,
-        "lat": -1.30, "lon": 36.81,
-        "avg_load_kw": 1900, "max_load_kw": 2700,
-        "has_solar": True, "has_generator": True,
-        "grid_stability": "moyen",
-        "data_source": "africa_grid",
-    },
-    "tikur_ethiopia": {
-        "name": "Tikur Anbessa Specialized Hospital",
-        "location": "Addis-Abeba, Éthiopie",
-        "flag": "🇪🇹",
-        "beds": 800,
-        "type": "Hôpital universitaire",
-        "who_reliability": 45.0,
-        "lat": 9.01, "lon": 38.75,
-        "avg_load_kw": 950, "max_load_kw": 1500,
-        "has_solar": False, "has_generator": True,
-        "grid_stability": "faible",
-        "data_source": "africa_grid",
-    },
-    "groote_schuur_sa": {
-        "name": "Groote Schuur Hospital",
-        "location": "Le Cap, Afrique du Sud",
-        "flag": "🇿🇦",
-        "beds": 893,
-        "type": "Hôpital universitaire (UCT)",
-        "who_reliability": 88.0,
-        "lat": -33.94, "lon": 18.46,
-        "avg_load_kw": 2400, "max_load_kw": 3300,
-        "has_solar": True, "has_generator": True,
-        "grid_stability": "instable (Eskom)",
-        "data_source": "africa_grid",
-    },
-    "fann_senegal": {
-        "name": "CHU de Fann",
-        "location": "Dakar, Sénégal",
-        "flag": "🇸🇳",
-        "beds": 600,
-        "type": "Centre hospitalier universitaire",
-        "who_reliability": 60.0,
-        "lat": 14.69, "lon": -17.46,
-        "avg_load_kw": 800, "max_load_kw": 1200,
-        "has_solar": True, "has_generator": True,
-        "grid_stability": "moyen",
-        "data_source": "africa_grid",
-    },
-    "parirenyatwa_zimbabwe": {
-        "name": "Parirenyatwa Group of Hospitals",
-        "location": "Harare, Zimbabwe",
-        "flag": "🇿🇼",
-        "beds": 1800,
-        "type": "Hôpital universitaire de référence",
-        "who_reliability": 35.0,
-        "lat": -17.79, "lon": 31.05,
-        "avg_load_kw": 1600, "max_load_kw": 2400,
-        "has_solar": False, "has_generator": True,
-        "grid_stability": "très faible",
-        "data_source": "africa_grid",
-    },
-    "muhimbili_tanzania": {
-        "name": "Muhimbili National Hospital",
-        "location": "Dar es Salaam, Tanzanie",
-        "flag": "🇹🇿",
-        "beds": 1500,
-        "type": "Hôpital national de référence",
-        "who_reliability": 58.0,
-        "lat": -6.80, "lon": 39.27,
-        "avg_load_kw": 1700, "max_load_kw": 2500,
-        "has_solar": True, "has_generator": True,
-        "grid_stability": "moyen",
-        "data_source": "africa_grid",
-    },
-    "luth_nigeria": {
-        "name": "Lagos University Teaching Hospital (LUTH)",
-        "location": "Lagos, Nigeria",
-        "flag": "🇳🇬",
-        "beds": 760,
-        "type": "Hôpital universitaire",
-        "who_reliability": 30.0,
-        "lat": 6.515, "lon": 3.358,
-        "avg_load_kw": 1400, "max_load_kw": 2200,
-        "has_solar": True, "has_generator": True,
-        "grid_stability": "très faible",
-        "data_source": "africa_grid",
-    },
-    "korle_bu_ghana": {
-        "name": "Korle Bu Teaching Hospital",
-        "location": "Accra, Ghana",
-        "flag": "🇬🇭",
-        "beds": 2000,
-        "type": "Hôpital universitaire",
-        "who_reliability": 70.0,
-        "lat": 5.535, "lon": -0.224,
-        "avg_load_kw": 1800, "max_load_kw": 2700,
-        "has_solar": False, "has_generator": True,
-        "grid_stability": "faible",
-        "data_source": "africa_grid",
-    },
-    "ibn_sina_morocco": {
-        "name": "CHU Ibn Sina",
-        "location": "Rabat, Maroc",
-        "flag": "🇲🇦",
-        "beds": 1100,
-        "type": "Centre hospitalier universitaire",
-        "who_reliability": 92.0,
-        "lat": 34.005, "lon": -6.834,
-        "avg_load_kw": 1500, "max_load_kw": 2200,
-        "has_solar": True, "has_generator": True,
-        "grid_stability": "stable",
-        "data_source": "africa_grid",
-    },
-    "kasr_alainy_egypt": {
-        "name": "Kasr Al Ainy Hospital (Cairo Univ.)",
-        "location": "Le Caire, Égypte",
-        "flag": "🇪🇬",
-        "beds": 5500,
-        "type": "Hôpital universitaire (Cairo Univ.)",
-        "who_reliability": 88.0,
-        "lat": 30.029, "lon": 31.213,
-        "avg_load_kw": 4500, "max_load_kw": 6500,
-        "has_solar": False, "has_generator": True,
-        "grid_stability": "moyen",
-        "data_source": "africa_grid",
-    },
-    "chuk_rwanda": {
-        "name": "CHU de Kigali (CHUK)",
-        "location": "Kigali, Rwanda",
-        "flag": "🇷🇼",
-        "beds": 519,
-        "type": "Centre hospitalier universitaire",
-        "who_reliability": 75.0,
-        "lat": -1.954, "lon": 30.057,
-        "avg_load_kw": 700, "max_load_kw": 1100,
-        "has_solar": True, "has_generator": True,
-        "grid_stability": "moyen",
-        "data_source": "africa_grid",
-    },
-    # ── Hôpitaux NHS (source : ERIC 2022-23) ────────────────────────
-    "st_thomas_nhs": {
-        "name": "St Thomas' Hospital",
-        "location": "London, Angleterre",
-        "flag": "🇬🇧",
-        "beds": 840,
-        "type": "Acute NHS Trust (ERIC)",
-        "who_reliability": 99.5,
-        "lat": 51.4988, "lon": -0.1175,
-        "avg_load_kw": 9361, "max_load_kw": 11863,
-        "has_solar": True, "has_generator": True,
-        "grid_stability": "très stable",
-        "data_source": "eric", "eric_code": "rj121",
-        "floor_area_m2": 150_000,
-        "annual_electricity_kwh": 82_000_000,
-    },
-    "addenbrookes_nhs": {
-        "name": "Addenbrooke's Hospital",
-        "location": "Cambridge, Angleterre",
-        "flag": "🇬🇧",
-        "beds": 1000,
-        "type": "Acute NHS Trust (ERIC)",
-        "who_reliability": 99.5,
-        "lat": 52.1753, "lon": 0.1405,
-        "avg_load_kw": 8904, "max_load_kw": 11500,
-        "has_solar": True, "has_generator": True,
-        "grid_stability": "très stable",
-        "data_source": "eric", "eric_code": "rgt01",
-        "floor_area_m2": 160_000,
-        "annual_electricity_kwh": 78_000_000,
-    },
-    "manchester_nhs": {
-        "name": "Manchester Royal Infirmary",
-        "location": "Manchester, Angleterre",
-        "flag": "🇬🇧",
-        "beds": 752,
-        "type": "Acute NHS Trust (ERIC)",
-        "who_reliability": 99.5,
-        "lat": 53.4617, "lon": -2.2260,
-        "avg_load_kw": 6621, "max_load_kw": 8500,
-        "has_solar": False, "has_generator": True,
-        "grid_stability": "très stable",
-        "data_source": "eric", "eric_code": "r0a01",
-        "floor_area_m2": 115_000,
-        "annual_electricity_kwh": 58_000_000,
-    },
-    "kings_college_nhs": {
-        "name": "King's College Hospital",
-        "location": "London, Angleterre",
-        "flag": "🇬🇧",
-        "beds": 950,
-        "type": "Acute NHS Trust (ERIC)",
-        "who_reliability": 99.5,
-        "lat": 51.4685, "lon": -0.0940,
-        "avg_load_kw": 8219, "max_load_kw": 10500,
-        "has_solar": True, "has_generator": True,
-        "grid_stability": "très stable",
-        "data_source": "eric", "eric_code": "rxh01",
-        "floor_area_m2": 140_000,
-        "annual_electricity_kwh": 72_000_000,
-    },
-    "john_radcliffe_nhs": {
-        "name": "John Radcliffe Hospital",
-        "location": "Oxford, Angleterre",
-        "flag": "🇬🇧",
-        "beds": 832,
-        "type": "Acute NHS Trust (ERIC)",
-        "who_reliability": 99.5,
-        "lat": 51.7636, "lon": -1.2200,
-        "avg_load_kw": 7078, "max_load_kw": 9000,
-        "has_solar": True, "has_generator": True,
-        "grid_stability": "très stable",
-        "data_source": "eric", "eric_code": "rth01",
-        "floor_area_m2": 120_000,
-        "annual_electricity_kwh": 62_000_000,
-    },
-    "guys_nhs": {
-        "name": "Guy's Hospital",
-        "location": "London, Angleterre",
-        "flag": "🇬🇧",
-        "beds": 400,
-        "type": "Acute NHS Trust (ERIC)",
-        "who_reliability": 99.5,
-        "lat": 51.5042, "lon": -0.0871,
-        "avg_load_kw": 5479, "max_load_kw": 7000,
-        "has_solar": False, "has_generator": True,
-        "grid_stability": "très stable",
-        "data_source": "eric", "eric_code": "rj122",
-        "floor_area_m2": 82_000,
-        "annual_electricity_kwh": 48_000_000,
-    },
-    "leeds_general_nhs": {
-        "name": "Leeds General Infirmary",
-        "location": "Leeds, Angleterre",
-        "flag": "🇬🇧",
-        "beds": 700,
-        "type": "Acute NHS Trust (ERIC)",
-        "who_reliability": 99.5,
-        "lat": 53.8018, "lon": -1.5520,
-        "avg_load_kw": 5936, "max_load_kw": 7600,
-        "has_solar": False, "has_generator": True,
-        "grid_stability": "très stable",
-        "data_source": "eric", "eric_code": "rr801",
-        "floor_area_m2": 100_000,
-        "annual_electricity_kwh": 52_000_000,
-    },
-    "birmingham_heartlands_nhs": {
-        "name": "Birmingham Heartlands Hospital",
-        "location": "Birmingham, Angleterre",
-        "flag": "🇬🇧",
-        "beds": 660,
-        "type": "Acute NHS Trust (ERIC)",
-        "who_reliability": 99.5,
-        "lat": 52.4636, "lon": -1.8220,
-        "avg_load_kw": 5251, "max_load_kw": 6700,
-        "has_solar": True, "has_generator": True,
-        "grid_stability": "très stable",
-        "data_source": "eric", "eric_code": "rq301",
-        "floor_area_m2": 95_000,
-        "annual_electricity_kwh": 46_000_000,
-    },
-    "newcastle_rvi_nhs": {
-        "name": "Royal Victoria Infirmary",
-        "location": "Newcastle, Angleterre",
-        "flag": "🇬🇧",
-        "beds": 900,
-        "type": "Acute NHS Trust (ERIC)",
-        "who_reliability": 99.5,
-        "lat": 54.9802, "lon": -1.6196,
-        "avg_load_kw": 7763, "max_load_kw": 9900,
-        "has_solar": False, "has_generator": True,
-        "grid_stability": "très stable",
-        "data_source": "eric", "eric_code": "ra701",
-        "floor_area_m2": 130_000,
-        "annual_electricity_kwh": 68_000_000,
-    },
-    "royal_devon_nhs": {
-        "name": "Royal Devon and Exeter Hospital",
-        "location": "Exeter, Angleterre",
-        "flag": "🇬🇧",
-        "beds": 600,
-        "type": "Acute NHS Trust (ERIC)",
-        "who_reliability": 99.5,
-        "lat": 50.7157, "lon": -3.5060,
-        "avg_load_kw": 4338, "max_load_kw": 5500,
-        "has_solar": True, "has_generator": True,
-        "grid_stability": "très stable",
-        "data_source": "eric", "eric_code": "ra401",
-        "floor_area_m2": 80_000,
-        "annual_electricity_kwh": 38_000_000,
-    },
-    "nyc_bellevue": {
-        "name": "Bellevue Hospital Center",
-        "location": "Manhattan, New York",
-        "flag": "🇺🇸",
-        "beds": 912,
-        "type": "Public Acute (NYC H+H)",
-        "who_reliability": 99.96,
-        "lat": 40.7395, "lon": -73.9766,
-        "avg_load_kw": 6046, "max_load_kw": 7800,
-        "has_solar": False, "has_generator": True,
-        "grid_stability": "très stable",
-        "data_source": "nyc_ll84", "nyc_code": "nyc_bellevue",
-        "floor_area_m2": 211_475,
-        "annual_electricity_kwh": 52_960_248,
-    },
-    "nyc_nyu_tisch": {
-        "name": "NYU Langone Tisch Hospital",
-        "location": "Manhattan, New York",
-        "flag": "🇺🇸",
-        "beds": 844,
-        "type": "Private Acute (NYU Langone)",
-        "who_reliability": 99.96,
-        "lat": 40.7426, "lon": -73.9744,
-        "avg_load_kw": 5153, "max_load_kw": 6700,
-        "has_solar": False, "has_generator": True,
-        "grid_stability": "très stable",
-        "data_source": "nyc_ll84", "nyc_code": "nyc_nyu_tisch",
-        "floor_area_m2": 64_040,
-        "annual_electricity_kwh": 45_139_152,
-    },
-    "nyc_nyp_brooklyn": {
-        "name": "NewYork-Presbyterian Brooklyn Methodist",
-        "location": "Brooklyn, New York",
-        "flag": "🇺🇸",
-        "beds": 1_001,
-        "type": "Private Acute (NYP)",
-        "who_reliability": 99.96,
-        "lat": 40.6686, "lon": -73.9801,
-        "avg_load_kw": 3698, "max_load_kw": 4800,
-        "has_solar": False, "has_generator": True,
-        "grid_stability": "très stable",
-        "data_source": "nyc_ll84", "nyc_code": "nyc_nyp_brooklyn",
-        "floor_area_m2": 126_587,
-        "annual_electricity_kwh": 32_396_762,
-    },
-    "nyc_elmhurst": {
-        "name": "Elmhurst Hospital Center",
-        "location": "Queens, New York",
-        "flag": "🇺🇸",
-        "beds": 545,
-        "type": "Public Acute (NYC H+H)",
-        "who_reliability": 99.96,
-        "lat": 40.7444, "lon": -73.8861,
-        "avg_load_kw": 3483, "max_load_kw": 4500,
-        "has_solar": False, "has_generator": True,
-        "grid_stability": "très stable",
-        "data_source": "nyc_ll84", "nyc_code": "nyc_elmhurst",
-        "floor_area_m2": 89_366,
-        "annual_electricity_kwh": 30_507_199,
-    },
-    "nyc_lincoln": {
-        "name": "Lincoln Medical Center",
-        "location": "Bronx, New York",
-        "flag": "🇺🇸",
-        "beds": 362,
-        "type": "Public Acute (NYC H+H)",
-        "who_reliability": 99.96,
-        "lat": 40.8177, "lon": -73.9242,
-        "avg_load_kw": 3566, "max_load_kw": 4600,
-        "has_solar": False, "has_generator": True,
-        "grid_stability": "très stable",
-        "data_source": "nyc_ll84", "nyc_code": "nyc_lincoln",
-        "floor_area_m2": 110_874,
-        "annual_electricity_kwh": 31_236_421,
-    },
+    k: v for k, v in _HOSPITAL_DISPLAY_FULL.items()
+    if not v.get("ui_hidden")
 }
 
 # N'afficher que les hôpitaux avec données de consommation réelles
@@ -440,6 +56,15 @@ REAL_HOSPITAL_KEYS = [
     if k == "lacor_uganda" or v.get("data_source") in REAL_DATA_SOURCES
 ]
 ALL_HOSPITAL_KEYS = list(HOSPITAL_DISPLAY.keys())
+
+# Site d'entraînement du modèle servi (scope=real). Sa fiabilité OMS sert de
+# RÉFÉRENCE pour l'ajustement de profil : ainsi le site entraîné n'est pas
+# ré-ajusté (sa probabilité reste calibrée), et les autres sites sont nudgés
+# RELATIVEMENT à lui — un score de risque heuristique, pas une proba calibrée.
+TRAINED_SITE_KEY = "lacor_uganda"
+REFERENCE_RELIABILITY = float(
+    _HOSPITAL_DISPLAY_FULL.get(TRAINED_SITE_KEY, {}).get("who_reliability", 50.0)
+)
 
 FEATURE_LABELS = {
     # ── Énergie & consommation ──
@@ -695,24 +320,53 @@ DATA_SOURCES = [
      "desc": "Orages, tornades, vagues de chaleur, haboobs"},
 ]
 
+# Types de sources réellement consommés par le modèle servi (cf. #3 : les
+# signaux externes ont été exclus pour éliminer le décalage entraînement/
+# service et le proxy temporel GDELT). Les autres sources restent ingérées et
+# affichées comme CONTEXTE, mais ne nourrissent pas le modèle.
+MODEL_USED_SOURCE_TYPES = {
+    "Hospitalier", "Météo historique", "Météo prévision",
+}
+
+
+def _source_used_by_model(src: dict) -> bool:
+    return src.get("type") in MODEL_USED_SOURCE_TYPES
+
 
 # ── Chargement ───────────────────────────────────────────────────────
 
 ERIC_DIR = ROOT / "data" / "raw" / "eric"
 
 
+# Noms de fichiers modèle : nouveaux noms neutres (le gagnant peut être RF,
+# XGBoost ou LightGBM), avec repli sur les anciens `*_rf.joblib` pour la
+# rétro-compatibilité tant que le pipeline n'a pas été ré-exécuté.
+_CALIBRATED_MODEL_NAMES = ("calibrated_model.joblib", "calibrated_rf.joblib")
+_BASELINE_MODEL_NAMES = ("baseline_model.joblib", "baseline_rf.joblib")
+
+
+def _resolve_model_path(names: tuple[str, ...]) -> Path | None:
+    """Renvoie le premier fichier modèle existant parmi `names`, ou None."""
+    for name in names:
+        p = MODELS_DIR / name
+        if p.exists():
+            return p
+    return None
+
+
 def _model_file_mtime() -> float:
     """Retourne le mtime du modèle pour invalider le cache quand le fichier change."""
-    for p in [MODELS_DIR / "calibrated_rf.joblib", MODELS_DIR / "baseline_rf.joblib"]:
-        if p.exists():
+    for names in (_CALIBRATED_MODEL_NAMES, _BASELINE_MODEL_NAMES):
+        p = _resolve_model_path(names)
+        if p is not None:
             return p.stat().st_mtime
     return 0.0
 
 
 @st.cache_resource
 def load_model(_mtime: float = 0.0):
-    calibrated_path = MODELS_DIR / "calibrated_rf.joblib"
-    baseline_path = MODELS_DIR / "baseline_rf.joblib"
+    calibrated_path = _resolve_model_path(_CALIBRATED_MODEL_NAMES)
+    baseline_path = _resolve_model_path(_BASELINE_MODEL_NAMES)
     summary_path = MODELS_DIR / "training_summary.json"
 
     winner_name = "?"
@@ -723,7 +377,7 @@ def load_model(_mtime: float = 0.0):
         except Exception:
             pass
 
-    if calibrated_path.exists():
+    if calibrated_path is not None:
         try:
             model = joblib.load(calibrated_path)
             st.sidebar.success(f"Modèle : **{winner_name}** (calibré)")
@@ -731,7 +385,7 @@ def load_model(_mtime: float = 0.0):
         except Exception as e:
             st.sidebar.warning(f"Échec du modèle calibré : {e} — fallback sur le brut")
 
-    if baseline_path.exists():
+    if baseline_path is not None:
         try:
             model = joblib.load(baseline_path)
             st.sidebar.info(f"Modèle : **{winner_name}** (brut)")
@@ -760,14 +414,22 @@ def load_shap_explainer(_mtime: float = 0.0):
 
 
 def _features_file_mtime() -> float:
-    p = FEATURES_DIR / "features_dataset.csv"
-    return p.stat().st_mtime if p.exists() else 0.0
+    # On regarde parquet ET CSV : le plus récent suffit pour invalider
+    # le cache Streamlit dès que l'un est régénéré.
+    candidates = [
+        FEATURES_DIR / "features_dataset.parquet",
+        FEATURES_DIR / "features_dataset.csv",
+    ]
+    mtimes = [p.stat().st_mtime for p in candidates if p.exists()]
+    return max(mtimes) if mtimes else 0.0
 
 
 @st.cache_data
 def load_lacor_features(_mtime: float = 0.0):
+    from src.utils.io import load_table
     csv_path = FEATURES_DIR / "features_dataset.csv"
-    if not csv_path.exists():
+    parquet_path = FEATURES_DIR / "features_dataset.parquet"
+    if not csv_path.exists() and not parquet_path.exists():
         st.error(
             f"**Données Lacor introuvables** : `{csv_path}`\n\n"
             "Exécutez d'abord le pipeline de preprocessing :\n"
@@ -775,7 +437,9 @@ def load_lacor_features(_mtime: float = 0.0):
         )
         st.stop()
     try:
-        df = pd.read_csv(csv_path)
+        # `load_table` privilégie parquet (~10× plus rapide qu'un CSV de
+        # 100 colonnes × 100k lignes), fallback CSV transparent.
+        df = load_table(csv_path)
         df["datetime"] = pd.to_datetime(df["datetime"])
         return df
     except Exception as e:
@@ -783,156 +447,16 @@ def load_lacor_features(_mtime: float = 0.0):
         st.stop()
 
 
-UGANDA_PUBLIC_HOLIDAYS_2022 = [
-    "2022-01-01", "2022-01-26", "2022-02-16", "2022-03-08",
-    "2022-04-15", "2022-04-18", "2022-05-01", "2022-05-02",
-    "2022-06-03", "2022-06-09", "2022-07-09", "2022-10-09",
-    "2022-12-25", "2022-12-26",
-]
-
-
 def _apply_feature_engineering(df: pd.DataFrame) -> pd.DataFrame:
-    """Applique le feature engineering complet sur un DataFrame brut hospitalier."""
-    df = df.copy()
-    df["datetime"] = pd.to_datetime(df["datetime"])
-    df["hour"] = df["datetime"].dt.hour
-    df["day_of_week"] = df["datetime"].dt.dayofweek
-    df["month"] = df["datetime"].dt.month
-    df["is_weekend"] = (df["day_of_week"] >= 5).astype(int)
-    df["hour_sin"] = np.sin(2 * np.pi * df["hour"] / 24)
-    df["hour_cos"] = np.cos(2 * np.pi * df["hour"] / 24)
-    df["month_sin"] = np.sin(2 * np.pi * df["month"] / 12)
-    df["month_cos"] = np.cos(2 * np.pi * df["month"] / 12)
+    """Applique le feature engineering complet sur un DataFrame brut hospitalier.
 
-    holidays = pd.to_datetime(UGANDA_PUBLIC_HOLIDAYS_2022)
-    df["is_public_holiday"] = df["datetime"].dt.normalize().isin(holidays).astype(int)
-
-    col = "total_load_kw"
-    df["load_rolling_6h"] = df[col].rolling(6, min_periods=1).mean()
-    df["load_rolling_24h"] = df[col].rolling(24, min_periods=1).mean()
-    df["load_std_24h"] = df[col].rolling(24, min_periods=1).std().fillna(0)
-    df["load_diff_1h"] = df[col].diff().fillna(0)
-    df["load_diff_24h"] = df[col].diff(24).fillna(0)
-    df["load_pct_change_1h"] = df[col].pct_change().fillna(0).replace([np.inf, -np.inf], 0)
-    df["peak_ratio"] = (df[col] / df["load_rolling_24h"]).fillna(1).replace([np.inf, -np.inf], 1)
-
-    total = df["total_load_kw"].replace(0, np.nan)
-    if "solar_pv_kw" in df.columns:
-        df["solar_ratio"] = (df["solar_pv_kw"] / total).fillna(0).clip(0, 1)
-    else:
-        df["solar_ratio"] = 0.0
-    if "base_load_kw" in df.columns:
-        df["base_load_ratio"] = (df["base_load_kw"] / total).fillna(0).clip(0, 1)
-    else:
-        df["base_load_ratio"] = 0.0
-    if "generators_kw" in df.columns:
-        df["generator_active"] = (df["generators_kw"] > 1.0).astype(int)
-        df["generator_ratio"] = (df["generators_kw"] / total).fillna(0).clip(0, 1)
-    else:
-        df["generator_active"] = 0
-        df["generator_ratio"] = 0.0
-    if "grid_available" in df.columns and "grid_availability_ratio" not in df.columns:
-        df["grid_availability_ratio"] = df["grid_available"]
-    if "grid_availability_ratio" in df.columns:
-        df["grid_availability_rolling_6h"] = df["grid_availability_ratio"].rolling(6, min_periods=1).mean()
-    else:
-        df["grid_availability_rolling_6h"] = 1.0
-    if "is_outage" in df.columns:
-        df["recent_outages_6h"] = df["is_outage"].rolling(6, min_periods=1).sum()
-        df["recent_outages_24h"] = df["is_outage"].rolling(24, min_periods=1).sum()
-    else:
-        df["recent_outages_6h"] = 0
-        df["recent_outages_24h"] = 0
-
-    # Colonnes météo de base (fallback à 0 si absentes)
-    for mcol in ["temperature_2m", "relative_humidity_2m", "wind_speed_10m",
-                  "wind_gusts_10m", "precipitation", "surface_pressure",
-                  "shortwave_radiation", "cape", "weathercode"]:
-        if mcol not in df.columns:
-            df[mcol] = 0.0
-
-    df["temp_humidity_interaction"] = df["temperature_2m"] * df["relative_humidity_2m"] / 100
-    df["wind_precipitation_interaction"] = df["wind_speed_10m"] * df["precipitation"]
-    df["solar_available"] = (df["shortwave_radiation"] > 50).astype(int)
-    df["heat_stress"] = (df["temperature_2m"] > 30).astype(int)
-
-    # ── Météo avancée ──
-    if "cloud_cover" in df.columns:
-        df["cloud_cover_pct"] = df["cloud_cover"]
-    else:
-        max_solar = df["shortwave_radiation"].rolling(24 * 30, min_periods=24).max()
-        df["cloud_cover_pct"] = (
-            (1 - df["shortwave_radiation"] / max_solar.replace(0, np.nan))
-            .fillna(0).clip(0, 1) * 100
-        )
-
-    if "dew_point_2m" not in df.columns:
-        t = df["temperature_2m"]
-        rh = df["relative_humidity_2m"]
-        a, b = 17.27, 237.7
-        gamma = (a * t / (b + t)) + np.log(rh / 100 + 1e-10)
-        df["dew_point_2m"] = (b * gamma / (a - gamma))
-
-    if "visibility" in df.columns:
-        df["visibility_m"] = df["visibility"]
-    elif "visibility_m" not in df.columns:
-        df["visibility_m"] = 10000.0
-
-    if "et0_fao_evapotranspiration" in df.columns:
-        df["evapotranspiration"] = df["et0_fao_evapotranspiration"]
-    elif "evapotranspiration" not in df.columns:
-        df["evapotranspiration"] = 0.0
-
-    df["rain_intensity"] = df["precipitation"] * df["wind_speed_10m"]
-    df["thermal_amplitude_24h"] = (
-        df["temperature_2m"].rolling(24, min_periods=1).max()
-        - df["temperature_2m"].rolling(24, min_periods=1).min()
-    )
-    df["humidity_change_3h"] = df["relative_humidity_2m"].diff(3).fillna(0)
-    df["pressure_change_3h"] = df["surface_pressure"].diff(3).fillna(0)
-
-    # ── Historique coupures ──
-    if "is_outage" in df.columns:
-        outage = df["is_outage"].astype(int).shift(1).fillna(0)
-        groups = (outage != outage.shift(1)).cumsum()
-        non_outage_mask = outage == 0
-        df["hours_since_last_outage"] = non_outage_mask.groupby(groups).cumsum().fillna(0)
-
-        outage_starts = (outage == 1) & (outage.shift(1) == 0)
-        outage_ends = (outage == 0) & (outage.shift(1) == 1)
-        durations = outage.groupby(outage_starts.cumsum()).transform("sum")
-        df["last_outage_duration_h"] = durations.where(outage_ends).ffill().fillna(0)
-
-        df["outage_frequency_7d"] = outage.rolling(168, min_periods=1).sum()
-
-        outage_hours_7d = outage.rolling(168, min_periods=1).sum()
-        outage_events_7d = (
-            outage_starts.shift(1)
-            .astype("boolean")
-            .fillna(False)
-            .astype(int)
-            .rolling(168, min_periods=1)
-            .sum()
-        )
-        df["avg_outage_duration_7d"] = (
-            (outage_hours_7d / outage_events_7d.replace(0, np.nan)).fillna(0)
-        )
-
-        recent_7d = outage.rolling(168, min_periods=1).sum()
-        prev_7d = outage.shift(168).rolling(168, min_periods=1).sum()
-        df["outage_trend_7d"] = (
-            (recent_7d / prev_7d.replace(0, np.nan)).fillna(1.0).clip(0, 10)
-        )
-    else:
-        df["hours_since_last_outage"] = 168.0
-        df["last_outage_duration_h"] = 0.0
-        df["outage_frequency_7d"] = 0.0
-        df["avg_outage_duration_7d"] = 0.0
-        df["outage_trend_7d"] = 1.0
-
-    numeric_cols = df.select_dtypes(include=[np.number]).columns
-    df[numeric_cols] = df[numeric_cols].fillna(0)
-    return df
+    Délègue à `apply_feature_engineering_single` (src.features.build_features)
+    pour garantir une parité STRICTE avec le pipeline d'entraînement —
+    l'ancienne implémentation locale dupliquait ~150 lignes et dérivait
+    progressivement (cf. P4.4).
+    """
+    from src.features.build_features import apply_feature_engineering_single
+    return apply_feature_engineering_single(df)
 
 
 def _forecast_file_mtime(hospital_key: str) -> float:
@@ -955,22 +479,32 @@ def load_meteo_forecast(hospital_key: str, _mtime: float = 0.0) -> pd.DataFrame 
         return None
 
 
-def _match_similar_historical_row(
-    df: pd.DataFrame,
-    target_hour: int,
-    target_month: int,
-    target_dow: int,
-    target_temp: float,
-) -> pd.Series:
-    """Retourne la ligne historique la plus proche des conditions visées
-    (même heure, même mois, jour-type similaire, température proche)."""
-    cand = df.copy()
-    cand["_h"] = (cand["hour"] - target_hour).abs()
-    cand["_m"] = (cand["month"] - target_month).abs()
-    cand["_d"] = (cand["day_of_week"] - target_dow).abs()
-    cand["_t"] = (cand["temperature_2m"] - target_temp).abs()
-    cand["_s"] = cand["_h"] * 3 + cand["_m"] * 2 + cand["_d"] + cand["_t"] * 0.1
-    return df.loc[cand["_s"].idxmin()]
+def _match_similar_historical_rows_bulk(
+    hist_df: pd.DataFrame,
+    target_hours: np.ndarray,
+    target_months: np.ndarray,
+    target_dows: np.ndarray,
+    target_temps: np.ndarray,
+) -> np.ndarray:
+    """Pour chaque triplet (hour, month, dow, temp) de prévision, retourne
+    l'index hist_df de la ligne la plus proche. Vectorisé (broadcasting
+    numpy) plutôt qu'une boucle Python qui copiait `hist_df` 168 fois.
+    """
+    h = hist_df["hour"].to_numpy()
+    m = hist_df["month"].to_numpy()
+    d = hist_df["day_of_week"].to_numpy()
+    t = hist_df["temperature_2m"].to_numpy()
+    hist_index = hist_df.index.to_numpy()
+
+    # Matrice (N_targets × N_hist) — pour 168 × 8760 ≈ 1.5M flottants, OK en RAM.
+    score = (
+        3.0 * np.abs(h[None, :] - target_hours[:, None])
+        + 2.0 * np.abs(m[None, :] - target_months[:, None])
+        + np.abs(d[None, :] - target_dows[:, None])
+        + 0.1 * np.abs(t[None, :] - target_temps[:, None])
+    )
+    best = score.argmin(axis=1)
+    return hist_index[best]
 
 
 def build_forecast_predictions(
@@ -984,11 +518,12 @@ def build_forecast_predictions(
     features (consommation empruntée à l'heure historique similaire, météo
     remplacée par les prévisions) et prédit la probabilité de coupure.
 
-    Retourne un DataFrame avec colonnes : datetime, outage_probability,
-    temperature_2m, precipitation, wind_speed_10m, shortwave_radiation,
-    + colonnes utiles pour affichage.
+    Optimisé : matching vectorisé + 1 seul appel `predict_proba` batché
+    (avant : 168 itérations Python × `df.copy()` × `predict_proba` unitaire).
     """
-    predictions = []
+    if forecast_df.empty:
+        return pd.DataFrame()
+
     meteo_cols_forecast = [
         "temperature_2m", "relative_humidity_2m", "dew_point_2m",
         "wind_speed_10m", "wind_gusts_10m", "precipitation",
@@ -996,59 +531,92 @@ def build_forecast_predictions(
         "visibility", "et0_fao_evapotranspiration", "cape", "weathercode",
     ]
 
-    for _, row in forecast_df.iterrows():
-        ts = row["datetime"]
-        hour = ts.hour
-        month = ts.month
-        dow = ts.dayofweek
-        temp = float(row.get("temperature_2m", 25.0))
+    fc = forecast_df.copy()
+    fc["datetime"] = pd.to_datetime(fc["datetime"])
+    if "temperature_2m" not in fc.columns:
+        fc["temperature_2m"] = 25.0
+    hours_t = fc["datetime"].dt.hour.to_numpy()
+    months_t = fc["datetime"].dt.month.to_numpy()
+    dows_t = fc["datetime"].dt.dayofweek.to_numpy()
+    temps_t = fc["temperature_2m"].fillna(25.0).to_numpy(dtype=np.float64)
 
-        ref = _match_similar_historical_row(hist_df, hour, month, dow, temp)
-        feat = ref[feature_cols].copy()
+    # 1) Trouver l'historique le plus proche pour chaque heure prévue.
+    best_idx = _match_similar_historical_rows_bulk(
+        hist_df, hours_t, months_t, dows_t, temps_t,
+    )
+    feat_batch = hist_df.loc[best_idx, feature_cols].reset_index(drop=True).copy()
 
-        for mcol in meteo_cols_forecast:
-            if mcol in row.index and mcol in feat.index:
-                feat[mcol] = float(row[mcol])
+    # 2) Écraser les variables météo par les prévisions.
+    for mcol in meteo_cols_forecast:
+        if mcol in fc.columns and mcol in feat_batch.columns:
+            feat_batch[mcol] = pd.to_numeric(fc[mcol].values, errors="coerce")
 
-        if "temperature_2m" in feat and "relative_humidity_2m" in feat:
-            feat["temp_humidity_interaction"] = feat["temperature_2m"] * feat["relative_humidity_2m"] / 100
-        if "wind_speed_10m" in feat and "precipitation" in feat:
-            feat["wind_precipitation_interaction"] = feat["wind_speed_10m"] * feat["precipitation"]
-            feat["rain_intensity"] = feat["precipitation"] * feat["wind_speed_10m"]
-        if "shortwave_radiation" in feat:
-            feat["solar_available"] = 1 if feat["shortwave_radiation"] > 50 else 0
-        if "temperature_2m" in feat:
-            feat["heat_stress"] = 1 if feat["temperature_2m"] > 30 else 0
-        if "cloud_cover" in feat and "cloud_cover_pct" in feat:
-            feat["cloud_cover_pct"] = feat["cloud_cover"]
-        if "visibility" in feat and "visibility_m" in feat:
-            feat["visibility_m"] = feat["visibility"]
-        if "et0_fao_evapotranspiration" in feat and "evapotranspiration" in feat:
-            feat["evapotranspiration"] = feat["et0_fao_evapotranspiration"]
+    # 3) Recalculer les variables dérivées cohérentes avec la météo prévue.
+    if {"temperature_2m", "relative_humidity_2m"}.issubset(feat_batch.columns):
+        feat_batch["temp_humidity_interaction"] = (
+            feat_batch["temperature_2m"] * feat_batch["relative_humidity_2m"] / 100
+        )
+    if {"wind_speed_10m", "precipitation"}.issubset(feat_batch.columns):
+        feat_batch["wind_precipitation_interaction"] = (
+            feat_batch["wind_speed_10m"] * feat_batch["precipitation"]
+        )
+        if "rain_intensity" in feat_batch.columns:
+            feat_batch["rain_intensity"] = (
+                feat_batch["precipitation"] * feat_batch["wind_speed_10m"]
+            )
+    if "shortwave_radiation" in feat_batch.columns and "solar_available" in feat_batch.columns:
+        feat_batch["solar_available"] = (feat_batch["shortwave_radiation"] > 50).astype(int)
+    if "temperature_2m" in feat_batch.columns and "heat_stress" in feat_batch.columns:
+        feat_batch["heat_stress"] = (feat_batch["temperature_2m"] > 30).astype(int)
+    if "cloud_cover" in feat_batch.columns and "cloud_cover_pct" in feat_batch.columns:
+        feat_batch["cloud_cover_pct"] = feat_batch["cloud_cover"]
+    if "visibility" in feat_batch.columns and "visibility_m" in feat_batch.columns:
+        feat_batch["visibility_m"] = feat_batch["visibility"]
+    if "et0_fao_evapotranspiration" in feat_batch.columns and "evapotranspiration" in feat_batch.columns:
+        feat_batch["evapotranspiration"] = feat_batch["et0_fao_evapotranspiration"]
 
-        feat["hour"] = hour
-        feat["month"] = month
-        feat["day_of_week"] = dow
-        feat["is_weekend"] = 1 if dow >= 5 else 0
-        feat["hour_sin"] = np.sin(2 * np.pi * hour / 24)
-        feat["hour_cos"] = np.cos(2 * np.pi * hour / 24)
-        feat["month_sin"] = np.sin(2 * np.pi * month / 12)
-        feat["month_cos"] = np.cos(2 * np.pi * month / 12)
+    # 4) Mettre à jour les variables temporelles cycliques pour les heures futures.
+    feat_batch["hour"] = hours_t
+    feat_batch["month"] = months_t
+    feat_batch["day_of_week"] = dows_t
+    feat_batch["is_weekend"] = (dows_t >= 5).astype(int)
+    feat_batch["hour_sin"] = np.sin(2 * np.pi * hours_t / 24)
+    feat_batch["hour_cos"] = np.cos(2 * np.pi * hours_t / 24)
+    feat_batch["month_sin"] = np.sin(2 * np.pi * months_t / 12)
+    feat_batch["month_cos"] = np.cos(2 * np.pi * months_t / 12)
 
-        row_df = ensure_numeric_feature_frame(pd.DataFrame([feat]), feature_cols)
-        proba = float(model.predict_proba(row_df)[0][1])
-        proba_adj, _ = adjust_for_hospital_profile(proba, hospital_info)
+    # 5) Prédiction batchée (1 appel pour tout l'horizon).
+    X = ensure_numeric_feature_frame(feat_batch, feature_cols)
+    proba = model.predict_proba(X)[:, 1].astype(float)
 
-        predictions.append({
-            "datetime": ts,
-            "outage_probability": proba_adj,
-            "temperature_2m": float(row.get("temperature_2m", 0.0)),
-            "precipitation": float(row.get("precipitation", 0.0)),
-            "wind_speed_10m": float(row.get("wind_speed_10m", 0.0)),
-            "shortwave_radiation": float(row.get("shortwave_radiation", 0.0)),
-        })
+    # Ajustement profil hôpital — vectorisé (facteur constant cf. P3 #19).
+    proba_adj = _adjust_proba_array_for_hospital(proba, hospital_info)
 
-    return pd.DataFrame(predictions)
+    return pd.DataFrame({
+        "datetime": fc["datetime"].values,
+        "outage_probability": proba_adj,
+        "temperature_2m": fc.get("temperature_2m", pd.Series(0.0, index=fc.index)).astype(float).values,
+        "precipitation": fc.get("precipitation", pd.Series(0.0, index=fc.index)).astype(float).values,
+        "wind_speed_10m": fc.get("wind_speed_10m", pd.Series(0.0, index=fc.index)).astype(float).values,
+        "shortwave_radiation": fc.get("shortwave_radiation", pd.Series(0.0, index=fc.index)).astype(float).values,
+    })
+
+
+def _adjust_proba_array_for_hospital(
+    probas: np.ndarray,
+    hospital_info: dict,
+) -> np.ndarray:
+    """Version vectorisée de `adjust_for_hospital_profile` : applique
+    le même facteur constant à toute une série, sans boucle Python.
+
+    Référence = fiabilité du site entraîné (Lacor) → facteur 1.0 pour Lacor
+    (probabilité calibrée préservée), nudge relatif pour les autres sites.
+    """
+    ref_reliability = REFERENCE_RELIABILITY
+    hospital_reliability = hospital_info.get("who_reliability", ref_reliability)
+    delta = (ref_reliability - hospital_reliability) / 100.0
+    factor = 1.0 + delta * 1.5
+    return np.clip(probas * factor, 0.01, 0.99)
 
 
 @st.cache_data
@@ -1125,13 +693,11 @@ def load_africa_grid_features(hospital_key: str, hospital_info: dict) -> pd.Data
     if base is None or base.empty:
         return None
     df = base.copy()
-    # Rebase temporel en "quasi temps réel" :
-    # on conserve le profil de consommation de Lacor mais on remplace
-    # les timestamps par une grille horaire se terminant maintenant.
-    # Ainsi les graphes/analyses ne restent pas bloqués en 2022.
-    now_h = pd.Timestamp.utcnow().floor("h").tz_localize(None)
-    df["datetime"] = pd.date_range(end=now_h, periods=len(df), freq="h")
-
+    # NOTE : on conserve les timestamps 2022 d'origine pour que la météo
+    # locale 2022, l'historique Lacor 2022 et les features cycliques
+    # (month, hour_sin/cos, is_public_holiday) restent cohérents entre
+    # eux. L'ancien rebase vers `now()` désynchronisait la météo 2022
+    # avec le mois affiché (cf. analyse P1.2).
     target_avg = float(hospital_info.get("avg_load_kw", 133))
     lacor_avg = 133.0
     scale = target_avg / lacor_avg if lacor_avg > 0 else 1.0
@@ -1155,8 +721,8 @@ def load_africa_grid_features(hospital_key: str, hospital_info: dict) -> pd.Data
         c for c in df.columns
         if any(c.startswith(p) for p in EXTERNAL_SIGNAL_PREFIXES)
     ]
-    for c in cols_to_zero:
-        df[c] = 0
+    if cols_to_zero:
+        df.loc[:, cols_to_zero] = 0
 
     local_meteo = ROOT / "data" / "raw" / f"meteo_{hospital_key}.csv"
     if local_meteo.exists():
@@ -1164,11 +730,19 @@ def load_africa_grid_features(hospital_key: str, hospital_info: dict) -> pd.Data
             meteo = pd.read_csv(local_meteo)
             meteo["datetime"] = pd.to_datetime(meteo["datetime"])
             meteo_cols = [c for c in meteo.columns if c not in ("datetime", "hospital")]
-            n = min(len(df), len(meteo))
             df["datetime"] = pd.to_datetime(df["datetime"])
-            for col in meteo_cols:
-                if col in meteo.columns:
-                    df.loc[df.index[:n], col] = meteo[col].values[:n]
+            # Merge robuste par datetime (et plus par position) : la météo
+            # locale a la même résolution horaire que le profil Lacor
+            # mais ses lignes peuvent être décalées d'une heure ou avoir
+            # des trous.
+            df = df.drop(columns=[c for c in meteo_cols if c in df.columns])
+            df = pd.merge_asof(
+                df.sort_values("datetime"),
+                meteo[["datetime", *meteo_cols]].sort_values("datetime"),
+                on="datetime",
+                direction="nearest",
+                tolerance=pd.Timedelta("1h"),
+            )
         except Exception as e:
             st.warning(f"Météo locale {hospital_key} illisible : {e}")
 
@@ -1330,7 +904,7 @@ def detect_hospital_data_sources(hospital_key: str, hospital_info: dict) -> list
     if (_RAW_DIR / f"air_quality_{hospital_key}.csv").exists():
         sources.append({
             "label": "Qualité de l'air Open-Meteo",
-            "emoji": "🌫️", "color": "#1abc9c", "status": "available",
+            "emoji": "🌫️", "color": "#1abc9c", "status": "context",
             "detail": "PM2.5, PM10, ozone, CO, NO₂, dust, UV",
         })
 
@@ -1339,7 +913,7 @@ def detect_hospital_data_sources(hospital_key: str, hospital_info: dict) -> list
     if em_path.exists():
         sources.append({
             "label": "Electricity Maps (réseau local)",
-            "emoji": "⚡", "color": "#f1c40f", "status": "available",
+            "emoji": "⚡", "color": "#f1c40f", "status": "context",
             "detail": "Zone locale, charge réseau, intensité carbone, mix",
         })
     else:
@@ -1353,7 +927,7 @@ def detect_hospital_data_sources(hospital_key: str, hospital_info: dict) -> list
     if (_RAW_DIR / f"usgs_earthquake_{hospital_key}.csv").exists():
         sources.append({
             "label": "Séismes USGS",
-            "emoji": "🌍", "color": "#8b6f47", "status": "available",
+            "emoji": "🌍", "color": "#8b6f47", "status": "context",
             "detail": "Magnitude ≥ 3.0 dans un rayon de 500 km",
         })
 
@@ -1361,7 +935,7 @@ def detect_hospital_data_sources(hospital_key: str, hospital_info: dict) -> list
     if (_RAW_DIR / f"gdacs_{hospital_key}.csv").exists():
         sources.append({
             "label": "Catastrophes GDACS (JRC/OCHA)",
-            "emoji": "🚨", "color": "#e67e22", "status": "available",
+            "emoji": "🚨", "color": "#e67e22", "status": "context",
             "detail": "Inondations, cyclones, séismes, sécheresses, feux",
         })
 
@@ -1369,7 +943,7 @@ def detect_hospital_data_sources(hospital_key: str, hospital_info: dict) -> list
     if (_RAW_DIR / f"gdelt_{hospital_key}.csv").exists():
         sources.append({
             "label": "Signal médiatique GDELT 2.0",
-            "emoji": "📰", "color": "#e84393", "status": "available",
+            "emoji": "📰", "color": "#e84393", "status": "context",
             "detail": "Volume / tonalité : énergie, météo, santé, désastres",
         })
 
@@ -1379,7 +953,7 @@ def detect_hospital_data_sources(hospital_key: str, hospital_info: dict) -> list
     ).exists():
         sources.append({
             "label": "NOAA Storm Events (USA)",
-            "emoji": "🌩️", "color": "#34495e", "status": "available",
+            "emoji": "🌩️", "color": "#34495e", "status": "context",
             "detail": "Tempêtes, tornades, vagues de chaleur (Arizona)",
         })
 
@@ -1391,6 +965,7 @@ def render_data_sources_badges(sources: list[dict]) -> str:
     status_label = {
         "primary":   ("Donnée primaire",    "#2ecc71"),
         "available": ("Disponible",          "#3498db"),
+        "context":   ("Contexte — non utilisé par le modèle", "#95a5a6"),
         "synthetic": ("Synthétique/cloné",  "#f39c12"),
         "missing":   ("Manquant",            "#e74c3c"),
     }
@@ -1426,17 +1001,11 @@ def render_data_sources_badges(sources: list[dict]) -> str:
     )
 
 
-# ── Préfixes des features dérivées de signaux externes ─────────────
-# Ces colonnes sont calculées à partir de fichiers raw propres à un site
-# (gdelt_<hospital>.csv, gdacs_<hospital>.csv, etc.). Quand on clone le
-# dataset Lacor pour un autre hôpital, ces colonnes contiennent encore les
-# valeurs de l'Ouganda → il faut les neutraliser pour éviter de prédire
-# Phoenix avec les épidémies/séismes/pollution de Lacor.
-EXTERNAL_SIGNAL_PREFIXES = (
-    "gdelt_", "gdacs_", "eq_", "air_",
-    "em_",
-    "noaa_", "storm_",
-)
+# Préfixes des signaux externes : centralisés dans src/utils/config.py
+# (EXTERNAL_SIGNAL_PREFIXES, importé ci-dessus). Ces familles sont désormais
+# exclues du modèle (cf. #3), mais on conserve la neutralisation ci-dessous
+# par sécurité (belt-and-suspenders) pour les colonnes encore présentes dans
+# les profils clonés.
 
 
 def _neutralize_external_signals(df: pd.DataFrame, hospital_key: str) -> pd.DataFrame:
@@ -1455,8 +1024,8 @@ def _neutralize_external_signals(df: pd.DataFrame, hospital_key: str) -> pd.Data
         c for c in df.columns
         if any(c.startswith(p) for p in EXTERNAL_SIGNAL_PREFIXES)
     ]
-    for c in cols_to_zero:
-        df[c] = 0
+    if cols_to_zero:
+        df.loc[:, cols_to_zero] = 0
     return df
 
 
@@ -1514,7 +1083,11 @@ def load_hospital_data(hospital_key: str, hospital_info: dict) -> pd.DataFrame:
 
 def get_feature_columns(df: pd.DataFrame) -> list[str]:
     drop = [c for c in COLS_TO_DROP if c in df.columns]
-    return [c for c in df.select_dtypes(include=[np.number]).columns if c not in drop]
+    cols = [c for c in df.select_dtypes(include=[np.number]).columns if c not in drop]
+    # Exclure les signaux externes du jeu de features du modèle (cf. #3).
+    # (En pratique, feature_cols est ensuite réaligné sur model.feature_names_in_,
+    # mais on filtre ici aussi pour la cohérence et le cas sans feature_names_in_.)
+    return drop_external_signal_columns(cols)
 
 
 # ── Fonctions utilitaires ────────────────────────────────────────────
@@ -1684,9 +1257,15 @@ def show_data_sources_panel() -> None:
     for i, src in enumerate(DATA_SOURCES):
         with cols[i % 2]:
             star = " ⭐" if src.get("key") else ""
+            used = _source_used_by_model(src)
+            # Badge honnête : utilisé par le modèle vs contexte (non utilisé).
+            if used:
+                use_lbl, use_col, border = "✓ utilisé par le modèle", "#2ecc71", "#2ecc71"
+            else:
+                use_lbl, use_col, border = "contexte — non utilisé", "#95a5a6", "#e0e0e0"
             st.markdown(
-                f"<div style='border:1px solid #e0e0e0;border-radius:8px;"
-                f"padding:10px 14px;margin-bottom:8px;background:#fafafa'>"
+                f"<div style='border:1px solid #e0e0e0;border-left:4px solid {border};"
+                f"border-radius:8px;padding:10px 14px;margin-bottom:8px;background:#fafafa'>"
                 f"<div style='display:flex;justify-content:space-between;"
                 f"align-items:center;gap:8px'>"
                 f"<b style='font-size:14px'>{src['icon']}  {src['name']}{star}</b>"
@@ -1696,6 +1275,9 @@ def show_data_sources_panel() -> None:
                 f"</div>"
                 f"<div style='color:#666;font-size:12px;margin-top:4px'>"
                 f"{src['desc']}</div>"
+                f"<div style='margin-top:4px;font-size:10px;font-weight:700;"
+                f"text-transform:uppercase;letter-spacing:0.5px;color:{use_col}'>"
+                f"● {use_lbl}</div>"
                 f"</div>",
                 unsafe_allow_html=True,
             )
@@ -1819,12 +1401,18 @@ def compute_shap_local(explainer, row_df: pd.DataFrame, feature_cols: list[str])
         return None, None
     try:
         sv = explainer.shap_values(row_df[feature_cols])
+        # Normaliser la sortie SHAP vers la classe positive (cf. train_baseline) :
+        # liste [c0, c1] | ndarray 3D (n, features, classes) | 2D (n, features).
         if isinstance(sv, list):
-            sv = sv[1]
-        expected = explainer.expected_value
-        if isinstance(expected, (list, np.ndarray)):
-            expected = expected[1] if len(expected) > 1 else expected[0]
-        return sv[0] if sv.ndim == 2 else sv, float(expected)
+            sv = sv[1] if len(sv) > 1 else sv[0]
+        sv = np.asarray(sv)
+        if sv.ndim == 3:
+            sv = sv[:, :, 1] if sv.shape[-1] > 1 else sv[:, :, 0]
+        expected = np.asarray(explainer.expected_value).ravel()
+        expected = float(expected[1] if expected.size > 1 else expected[0])
+        # Une seule ligne → vecteur 1D de longueur n_features.
+        sv_row = sv[0] if sv.ndim == 2 else np.ravel(sv)
+        return sv_row, expected
     except Exception:
         return None, None
 
@@ -1929,12 +1517,16 @@ def adjust_for_hospital_profile(
     """
     Ajuste la probabilité selon le profil de risque de l'hôpital sélectionné.
 
-    Le modèle est entraîné sur un corpus multi-hôpitaux avec des niveaux de
-    fiabilité réseau différents. On applique un léger ajustement contextuel :
-      - Fiabilité basse (ex: Éthiopie 23%) → risque augmenté
-      - Fiabilité haute (ex: USA 98%) → risque diminué
+    Le modèle servi est entraîné sur Lacor (scope=real). La référence est donc
+    la fiabilité OMS de Lacor : pour Lacor, facteur = 1.0 → la probabilité
+    CALIBRÉE est préservée. Pour les autres sites, on applique un nudge
+    heuristique relatif à Lacor (moins fiable → risque ↑, plus fiable → ↓).
+
+    ⚠️ Conséquence : pour un site ≠ Lacor, la valeur renvoyée n'est plus une
+    probabilité calibrée mais un *score de risque ajusté au profil* — c'est
+    signalé dans `notes`.
     """
-    ref_reliability = 50.0
+    ref_reliability = REFERENCE_RELIABILITY
     hospital_reliability = hospital_info.get("who_reliability", ref_reliability)
 
     delta = (ref_reliability - hospital_reliability) / 100.0
@@ -1946,6 +1538,13 @@ def adjust_for_hospital_profile(
     adjusted = min(0.99, max(0.01, proba * factor))
 
     notes = []
+    # Si un nudge non trivial est appliqué (site ≠ référence), être honnête :
+    # la valeur affichée est un score ajusté, pas une probabilité calibrée.
+    if abs(factor - 1.0) > 1e-6:
+        notes.append(
+            "Score *ajusté au profil du site* (≠ probabilité calibrée — "
+            "le modèle est calibré sur Lacor)"
+        )
     stability = hospital_info.get("grid_stability", "moyen")
     if hospital_reliability < 30:
         notes.append(f"Réseau {stability} — fiabilité OMS très basse ({hospital_reliability:.0f}%)")
@@ -2076,13 +1675,23 @@ if _model_feats is not None:
 _summary_path = MODELS_DIR / "training_summary.json"
 _winner_name = "RandomForest"
 _n_features_train = len(feature_cols)
+_train_scope = None
 if _summary_path.exists():
     try:
         with open(_summary_path) as _f:
             _summary = json.load(_f)
         _winner_name = _summary.get("winner", _winner_name)
+        _train_scope = _summary.get("scope")
     except Exception:
         pass
+
+# Indique la portée d'entraînement : "real" = modèle entraîné uniquement sur
+# des coupures réellement observées (métriques honnêtes) ; "all" = inclut des
+# coupures synthétiques (métriques globales biaisées).
+if _train_scope == "real":
+    st.sidebar.caption("🎯 Entraîné sur **données réelles** (coupures observées)")
+elif _train_scope == "all":
+    st.sidebar.caption("⚠️ Entraîné sur **tous** les sites (coupures synthétiques incluses)")
 
 st.markdown(
     f"""
@@ -2370,10 +1979,16 @@ else:
 # ── Bandeau « Sources & facteurs du modèle » ───────────────────────
 
 with st.expander("📊  Sources de données & facteurs du modèle", expanded=False):
+    n_used = sum(_source_used_by_model(s) for s in DATA_SOURCES)
     st.markdown(
-        f"Le modèle exploite **{len(DATA_SOURCES)} sources de données** complémentaires "
-        "pour estimer le risque de coupure. Voici les facteurs ayant le plus "
-        "d'impact, en moyenne, sur les prédictions du modèle entraîné."
+        f"Le pipeline **ingère {len(DATA_SOURCES)} sources de données**, mais le "
+        f"modèle servi s'appuie volontairement sur un sous-ensemble **robuste "
+        f"({n_used} familles : consommation + météo)**, enrichi de features "
+        "temporelles et d'historique des coupures (~49 features). Les signaux "
+        "externes (médias GDELT, catastrophes, sismique, pollution, réseau) sont "
+        "**ingérés comme contexte mais exclus du modèle** pour garantir la "
+        "cohérence entraînement/service. Voici les facteurs au plus fort impact "
+        "moyen sur les prédictions."
     )
 
     panel_left, panel_right = st.columns([3, 2])
@@ -2582,8 +2197,17 @@ with tab_predict:
                         st.warning("Pas assez de données pour l'analyse (minimum 2 heures requises).")
                         st.stop()
                     X = ensure_numeric_feature_frame(recent, feature_cols)
-                    proba_series = model.predict_proba(X)[:, 1]
-                    recent["outage_probability"] = proba_series
+                    proba_brute = model.predict_proba(X)[:, 1].astype(float)
+
+                    # Ajustement profil hôpital appliqué UNE seule fois, à toute
+                    # la série, AVANT de dériver le seuil et le maximum. Auparavant
+                    # le seuil 0.5 portait sur la proba brute tandis que le graphe
+                    # affichait la proba ajustée → incohérence seuil ↔ affichage
+                    # (cf. analyse #4). Le score affiché est dès lors un « risque
+                    # ajusté au profil » et non une probabilité calibrée.
+                    recent["outage_probability"] = _adjust_proba_array_for_hospital(
+                        proba_brute, hospital,
+                    )
 
                     high_risk = recent[recent["outage_probability"] > 0.5]
                     if high_risk.empty:
@@ -2594,10 +2218,9 @@ with tab_predict:
                         max_proba = high_risk.iloc[0]["outage_probability"]
                         hours_away = max(0, (high_risk.iloc[0]["datetime"] - recent["datetime"].iloc[-1]).total_seconds() / 3600)
 
-                    max_proba, h_notes = adjust_for_hospital_profile(max_proba, hospital)
-                    recent["outage_probability"] = recent["outage_probability"].apply(
-                        lambda p: adjust_for_hospital_profile(p, hospital)[0]
-                    )
+                    # Notes de profil seulement : elles ne dépendent que de
+                    # `hospital_info`, pas de la proba (qui est déjà ajustée).
+                    _, h_notes = adjust_for_hospital_profile(0.0, hospital)
                     duration = round(1.0 + max_proba * 4.0, 1) if max_proba > 0.5 else 0.5
                     last_row = ensure_numeric_feature_frame(recent.tail(1), feature_cols).iloc[-1]
                     factors = get_top_factors(model, feature_cols, last_row)

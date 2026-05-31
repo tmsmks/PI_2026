@@ -297,8 +297,12 @@ def run() -> None:
 
     existing = load_eric_csv()
     if existing is not None:
-        logger.info("Données ERIC chargées depuis CSV : %d lignes", len(existing))
-        save_csv(existing, ERIC_DIR / "eric_summary.csv")
+        logger.info(
+            "Données ERIC CSV trouvées (%d lignes) — on garde la version "
+            "synthétisée comme résumé (les CSV bruts ERIC ne sont pas "
+            "alignés sur notre schéma).",
+            len(existing),
+        )
     else:
         logger.info("Pas de CSV ERIC local → construction depuis statistiques publiées")
 

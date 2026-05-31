@@ -514,7 +514,7 @@ Open-Meteo   Air Quality      USGS    GDACS        GDELT       Electricity
                        `src/models/train_baseline.py`
                                     │
                                     ▼
-                        `models/calibrated_rf.joblib`
+                        `models/calibrated_model.joblib`
 ```
 
 ### Types de jointure

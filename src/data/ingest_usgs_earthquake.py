@@ -27,7 +27,7 @@ Sortie : `data/raw/usgs_earthquake_<hospital>.csv`
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
@@ -121,6 +121,10 @@ def _build_hourly_stress(
     Le « stress sismique » à l'instant t pour un séisme survenu en t₀ :
         stress(t) = magnitude × exp(-(t-t₀) / decay) × (1 - distance/radius)
     Pour chaque heure on somme les stress résiduels de tous les séismes passés.
+
+    Implémentation vectorisée : on matérialise la matrice (heures × events)
+    en numpy via broadcasting plutôt qu'une boucle Python sur 8 760 itérations.
+    Pour ~500 événements c'est ~100× plus rapide.
     """
     hourly_index = pd.date_range(
         start.replace(minute=0, second=0, microsecond=0),
@@ -140,25 +144,35 @@ def _build_hourly_stress(
     events = events.copy()
     events["datetime"] = pd.to_datetime(events["datetime"]).dt.tz_localize(None)
     events = events[(events["datetime"] >= start) & (events["datetime"] < end)]
+    if events.empty:
+        return out
 
     proximity = (1.0 - (events["distance_km"] / USGS_SEARCH_RADIUS_KM)).clip(0, 1)
     events["proximity"] = proximity
 
-    for ts_hour in out["datetime"]:
-        delta_h = (ts_hour - events["datetime"]).dt.total_seconds() / 3600.0
-        recent = (delta_h >= 0) & (delta_h <= 24)
+    # Matrice delta_h (H heures × E événements) en heures depuis le séisme.
+    hours_np = out["datetime"].to_numpy(dtype="datetime64[ns]")
+    ev_np = events["datetime"].to_numpy(dtype="datetime64[ns]")
+    delta_h = (hours_np[:, None] - ev_np[None, :]).astype("timedelta64[s]").astype(np.float64) / 3600.0
 
-        if recent.any():
-            out.loc[out["datetime"] == ts_hour, "eq_recent_count_24h"] = int(recent.sum())
-            out.loc[out["datetime"] == ts_hour, "eq_max_mag_24h"] = float(events.loc[recent, "magnitude"].max())
-            out.loc[out["datetime"] == ts_hour, "eq_distance_min_km"] = float(events.loc[recent, "distance_km"].min())
+    mag_np = events["magnitude"].to_numpy(dtype=np.float64)
+    prox_np = events["proximity"].to_numpy(dtype=np.float64)
+    dist_np = events["distance_km"].to_numpy(dtype=np.float64)
 
-        decay = np.exp(-delta_h.clip(lower=0) / decay_hours)
-        active = delta_h >= 0
-        stress = (events.loc[active, "magnitude"]
-                  * decay.loc[active]
-                  * events.loc[active, "proximity"]).sum()
-        out.loc[out["datetime"] == ts_hour, "eq_stress"] = float(stress)
+    active = delta_h >= 0
+    decay = np.where(active, np.exp(-np.clip(delta_h, 0, None) / decay_hours), 0.0)
+    stress_matrix = decay * mag_np[None, :] * prox_np[None, :]
+    out["eq_stress"] = stress_matrix.sum(axis=1)
+
+    recent = active & (delta_h <= 24)
+    has_recent = recent.any(axis=1)
+    out["eq_recent_count_24h"] = recent.sum(axis=1).astype(int)
+    if has_recent.any():
+        # max(magnitude) et min(distance) sur la fenêtre 24 h, par broadcasting.
+        mag_masked = np.where(recent, mag_np[None, :], -np.inf)
+        out.loc[has_recent, "eq_max_mag_24h"] = mag_masked[has_recent].max(axis=1)
+        dist_masked = np.where(recent, dist_np[None, :], np.inf)
+        out.loc[has_recent, "eq_distance_min_km"] = dist_masked[has_recent].min(axis=1)
 
     return out
 
@@ -214,7 +228,7 @@ def run(
 
 def run_live(window_days: int = 30) -> None:
     """Récupère une fenêtre glissante récente (quasi temps réel)."""
-    end = datetime.utcnow()
+    end = datetime.now(timezone.utc).replace(tzinfo=None)
     start = end - timedelta(days=window_days)
     run(year=None, start=start, end=end)
 

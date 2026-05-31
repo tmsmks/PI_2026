@@ -43,15 +43,16 @@ multi-hôpitaux  ──►   `hospital_merged.csv`  ──►  RF / XGB / LGBM  
 | Étape | Script | Entrée | Sortie |
 |-------|--------|--------|--------|
 | Feature engineering | `src/features/build_features.py` | `data/processed/hospital_merged.csv` | `data/features/features_dataset.csv` |
-| Entraînement | `src/models/train_baseline.py` | `data/features/features_dataset.csv` | `models/calibrated_rf.joblib` + `models/baseline_rf.joblib` |
+| Entraînement | `src/models/train_baseline.py` | `data/features/features_dataset.csv` | `models/calibrated_model.joblib` + `models/baseline_model.joblib` |
 | Comparaison + métriques | `src/models/train_baseline.py` | tous les modèles | `models/model_comparison.csv` + `models/training_summary.json` |
 | Importance MDI | `src/models/train_baseline.py` | Modèle gagnant | `models/feature_importance.csv` |
 | SHAP | `src/models/train_baseline.py` | Modèle + test set | `models/shap_explainer.joblib` + `models/shap_values.npz` + `models/shap_feature_importance.csv` |
 | Prédiction (app) | `app.py` | Modèle calibré + features | Probabilité + waterfall SHAP |
 
-> Note : les noms `baseline_rf.joblib` et `calibrated_rf.joblib` sont
-> conservés pour rétro-compatibilité — le modèle stocké est en réalité le
-> gagnant courant (LightGBM dans la run actuelle).
+> Note : les fichiers `baseline_model.joblib` et `calibrated_model.joblib`
+> contiennent le **gagnant courant** de la comparaison RF / XGBoost / LightGBM
+> (LightGBM dans la run actuelle), d'où le nom neutre. Les anciens noms
+> `*_rf.joblib` restent lus en repli par l'app.
 
 ---
 
@@ -300,8 +301,8 @@ LGBMClassifier(
 )
 ```
 
-Sauvegardé dans `models/baseline_rf.joblib` (modèle brut) et
-`models/calibrated_rf.joblib` (modèle calibré utilisé par l'app).
+Sauvegardé dans `models/baseline_model.joblib` (modèle brut) et
+`models/calibrated_model.joblib` (modèle calibré utilisé par l'app).
 
 ---
 

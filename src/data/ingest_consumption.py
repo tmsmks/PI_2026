@@ -38,7 +38,10 @@ def load_lacor() -> pd.DataFrame:
     df["datetime"] = pd.to_datetime(df["datetime"])
     df = df.sort_values("datetime").reset_index(drop=True)
 
-    df["is_outage"] = (1 - df["grid_available"]).astype(int)
+    # Robustesse : `grid_available` est documenté comme binaire mais
+    # certaines lignes Excel exportées peuvent contenir 0.5 (lecture
+    # partielle au pas 15 min). On binarise explicitement (<0.5 = coupure).
+    df["is_outage"] = (pd.to_numeric(df["grid_available"], errors="coerce") < 0.5).astype(int)
 
     logger.info(
         "Lacor : %d lignes, plage %s → %s, coupures=%d (%.1f%%)",

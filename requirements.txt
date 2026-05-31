@@ -11,3 +11,6 @@ plotly==6.6.0
 xgboost==3.2.0
 lightgbm==4.6.0
 shap==0.51.0
+# Lecture/écriture parquet (≥10× plus rapide que CSV pour
+# features_dataset & hospital_merged). Fallback CSV silencieux si absent.
+pyarrow==18.1.0

@@ -30,32 +30,12 @@ METEO_HOURLY_VARS = [
 ]
 
 # ── Coordonnées des hôpitaux ────────────────────────────────────────
-# Utilisé par les ingestions basées sur la géolocalisation
-# (Open-Meteo historique, Open-Meteo Forecast, NOAA, GDELT).
-HOSPITAL_LOCATIONS = {
-    # Hôpital de référence (entraînement du modèle)
-    "lacor_uganda":         {"lat": 2.77,    "lon": 32.30,    "country": "UGA"},
-    # Benchmarks internationaux
-    "phoenix_usa":          {"lat": 33.45,   "lon": -112.07,  "country": "USA"},
-    "kenyatta_kenya":       {"lat": -1.30,   "lon": 36.81,    "country": "KEN"},
-    "tikur_ethiopia":       {"lat": 9.01,    "lon": 38.75,    "country": "ETH"},
-    "groote_schuur_sa":     {"lat": -33.94,  "lon": 18.46,    "country": "ZAF"},
-    "dhaka_bangladesh":     {"lat": 23.73,   "lon": 90.40,    "country": "BGD"},
-    "fann_senegal":         {"lat": 14.69,   "lon": -17.46,   "country": "SEN"},
-    "parirenyatwa_zimbabwe":{"lat": -17.79,  "lon": 31.05,    "country": "ZWE"},
-    "muhimbili_tanzania":   {"lat": -6.80,   "lon": 39.27,    "country": "TZA"},
-    "luth_nigeria":         {"lat": 6.515,   "lon": 3.358,    "country": "NGA"},
-    "korle_bu_ghana":       {"lat": 5.535,   "lon": -0.224,   "country": "GHA"},
-    "ibn_sina_morocco":     {"lat": 34.005,  "lon": -6.834,   "country": "MAR"},
-    "kasr_alainy_egypt":    {"lat": 30.029,  "lon": 31.213,   "country": "EGY"},
-    "chuk_rwanda":          {"lat": -1.954,  "lon": 30.057,   "country": "RWA"},
-    # Hôpitaux NHS (UK, source ERIC)
-    "st_thomas_nhs":        {"lat": 51.4988, "lon": -0.1175,  "country": "GBR"},
-    "addenbrookes_nhs":     {"lat": 52.1753, "lon": 0.1405,   "country": "GBR"},
-    "manchester_nhs":       {"lat": 53.4617, "lon": -2.2260,  "country": "GBR"},
-    "kings_college_nhs":    {"lat": 51.4685, "lon": -0.0940,  "country": "GBR"},
-    "john_radcliffe_nhs":   {"lat": 51.7636, "lon": -1.2200,  "country": "GBR"},
-}
+# Dérivé automatiquement du catalogue UI dans `src/utils/hospitals.py`.
+# Utilisé par les ingestions géolocalisées (Open-Meteo, Forecast, USGS,
+# GDACS, GDELT, NOAA, Electricity Maps).
+from src.utils.hospitals import HOSPITAL_DISPLAY, build_hospital_locations  # noqa: E402
+
+HOSPITAL_LOCATIONS = build_hospital_locations()
 
 # ── GDELT DOC 2.0 (signal médiatique événementiel) ──────────────────
 # Base d'articles mondiale, sans clé, utile là où on n'a pas d'API réseau.
@@ -232,6 +212,73 @@ LACOR_FILE = RAW_DIR / "lacor_hospital.xlsx"
 
 RANDOM_SEED = 42
 TEST_SIZE = 0.2
+
+# ── Colonnes exclues du modèle (centralisé) ─────────────────────────
+# Réutilisé par `train_baseline.py` (pour `prepare_data`) et par `app.py`
+# (pour `get_feature_columns`). Toute modification ici se propage des
+# deux côtés.
+COLS_TO_DROP = [
+    "datetime",
+    "is_outage",
+    # Colonnes avec fuite directe (connues uniquement pendant la coupure)
+    "grid_availability_ratio",
+    "generators_kw",
+    "generator_active",
+    "generator_ratio",
+    "grid_availability_rolling_6h",
+    "recent_outages_6h",
+    "recent_outages_24h",
+    # Constantes sur la série mono-hôpital
+    "storm_risk",
+    # Colonnes brutes météo redondantes avec les features dérivées
+    "cloud_cover",
+    "visibility",
+    "et0_fao_evapotranspiration",
+]
+
+# ── Signaux externes exclus du modèle (cf. #3 train-serve skew) ──────
+# Ces familles de features (médias GDELT, catastrophes GDACS, sismique USGS,
+# qualité de l'air, charge réseau Electricity Maps, tempêtes NOAA) sont :
+#   1. mises à 0 à l'inférence pour tout hôpital ≠ Lacor → décalage
+#      entraînement/service (train-serve skew) ;
+#   2. dominées par les volumes de presse GDELT, qui agissaient comme un
+#      proxy temporel spurieux (top importance sur 1 an / 1 hôpital).
+# On les exclut donc du jeu de features du modèle. Les colonnes restent
+# présentes dans `features_dataset` (inspection / réactivation éventuelle),
+# mais ne sont jamais fournies au modèle. Réutilisé par `train_baseline`
+# (prepare_data) et `app.py` (get_feature_columns).
+EXTERNAL_SIGNAL_PREFIXES = (
+    "gdelt_", "gdacs_", "eq_", "air_", "em_", "noaa_", "storm_",
+)
+
+
+def is_external_signal(col: str) -> bool:
+    """True si la colonne dérive d'un signal externe exclu du modèle."""
+    return col.startswith(EXTERNAL_SIGNAL_PREFIXES)
+
+
+def drop_external_signal_columns(columns) -> list:
+    """Retourne `columns` sans les colonnes de signaux externes."""
+    return [c for c in columns if not is_external_signal(c)]
+
+# ── Jours fériés Uganda 2022 (Lacor) ─────────────────────────────────
+# Centralisé pour éviter la duplication dans build_features.py et app.py.
+UGANDA_PUBLIC_HOLIDAYS_2022 = [
+    "2022-01-01",  # New Year
+    "2022-01-26",  # NRM Liberation Day
+    "2022-02-16",  # Archbishop Janani Luwum Day
+    "2022-03-08",  # International Women's Day
+    "2022-04-15",  # Good Friday
+    "2022-04-18",  # Easter Monday
+    "2022-05-01",  # Labour Day
+    "2022-05-02",  # Eid al-Fitr (approx.)
+    "2022-06-03",  # Martyrs' Day
+    "2022-06-09",  # National Heroes' Day
+    "2022-07-09",  # Eid al-Adha (approx.)
+    "2022-10-09",  # Independence Day
+    "2022-12-25",  # Christmas
+    "2022-12-26",  # Boxing Day
+]
 
 # ── Performance tuning ───────────────────────────────────────────────
 # Ces valeurs servent de défauts globaux et peuvent être surchargées

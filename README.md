@@ -13,6 +13,12 @@ Le pipeline d'entraînement est **multi-hôpitaux** :
 
 La variable cible est `is_outage` (1 = coupure, 0 = pas de coupure).
 
+> ⚠️ **Seules les coupures de Lacor sont réellement observées.** Les coupures
+> ERIC/NYC sont générées par une formule stochastique (profils de consommation
+> réalistes mais cible synthétique). C'est pourquoi l'entraînement se fait
+> **par défaut sur Lacor uniquement** (`--scope real`) : voir la section
+> *Exécution*. Le multi-hôpitaux complet reste disponible via `--scope all`.
+
 ## Structure du projet
 
 ```
@@ -25,8 +31,8 @@ PI_26/
 │   ├── processed/            ← hospital_merged.csv (multi-hôpitaux fusionné)
 │   └── features/             ← features_dataset.csv (dataset d'entraînement)
 ├── models/
-│   ├── baseline_rf.joblib          ← meilleur modèle brut (nom historique conservé)
-│   ├── calibrated_rf.joblib        ← modèle calibré isotonique (utilisé par l'app)
+│   ├── baseline_model.joblib       ← meilleur modèle brut (RF / XGB / LGBM selon la run)
+│   ├── calibrated_model.joblib     ← modèle calibré isotonique (utilisé par l'app)
 │   ├── shap_explainer.joblib       ← TreeExplainer SHAP
 │   ├── shap_values.npz             ← SHAP values du test set
 │   ├── shap_feature_importance.csv ← importance SHAP globale
@@ -76,7 +82,11 @@ pip install -r requirements.txt
 
 ```bash
 # Pipeline complet (ingestion historique 2022 → features → entraînement + SHAP)
+# Par défaut : --scope real (entraînement sur coupures réellement observées)
 python run_pipeline.py
+
+# Entraînement multi-hôpitaux complet (inclut coupures synthétiques ERIC/NYC)
+python run_pipeline.py --scope all
 
 # Pipeline en mode "live" (fenêtre glissante récente, par défaut 30 jours)
 python run_pipeline.py --mode live --window-days 30
@@ -91,7 +101,13 @@ python run_pipeline.py --grid-scale compact --cv-folds 3 --shap-sample-size 2000
 streamlit run app.py
 ```
 
-Tous les flags CLI sont définis dans `run_pipeline.py` (`--mode {train,live}`, `--window-days`, `--fast`, `--grid-scale {compact,full}`, `--cv-folds`, `--shap-sample-size`, `--no-full-artifacts`).
+Tous les flags CLI sont définis dans `run_pipeline.py` (`--mode {train,live}`, `--window-days`, `--fast`, `--grid-scale {compact,full}`, `--cv-folds`, `--shap-sample-size`, `--no-full-artifacts`, `--scope {real,all}`).
+
+> **Portée d'entraînement (`--scope`)** — `real` (défaut) n'entraîne et n'évalue
+> que sur les hôpitaux à coupures **réellement observées** (Lacor). Les sites
+> ERIC/NYC ont des coupures **générées par une formule stochastique** : les
+> inclure (`--scope all`) revient à entraîner sur ~94 % de bruit et gonfle
+> artificiellement le F1 global. Le défaut `real` garantit des métriques honnêtes.
 
 ## Pipeline d'entraînement
 
@@ -101,27 +117,42 @@ Tous les flags CLI sont définis dans `run_pipeline.py` (`--mode {train,live}`, 
 2. **Preprocessing** ([src/data/preprocessing.py](src/data/preprocessing.py)) — rééchantillonnage Lacor 15 min → 1 h, fusion multi-hôpitaux et signaux externes
 3. **Feature engineering** ([src/features/build_features.py](src/features/build_features.py)) — features temporelles cycliques, rolling de charge, interactions météo, dérivées GDELT/GDACS/NOAA/USGS/Air Quality
 4. **Entraînement** ([src/models/train_baseline.py](src/models/train_baseline.py)) :
-   1. Split temporel 80/20 **par hôpital**
+   1. Split temporel 80/20 **par hôpital** (train réordonné chronologiquement pour une vraie CV temporelle)
    2. **GridSearchCV** + **TimeSeriesSplit** (5 folds) pour RF / XGBoost / LightGBM
    3. Comparaison → sélection automatique du meilleur (F1 sur CV)
-   4. **Calibration isotonique** (`CalibratedClassifierCV`)
+   4. **Calibration adaptative** (`--calibration auto`) : compare *aucune calibration* / isotonique / sigmoïde sur une validation interne et ne recalibre que si le Brier s'améliore d'une marge nette (un GBM est souvent déjà bien calibré)
    5. Évaluation hold-out (brut + calibré)
    6. **SHAP TreeExplainer** + sauvegarde des artefacts
+
+> **Signaux externes exclus du modèle (`config.EXTERNAL_SIGNAL_PREFIXES`)** — les
+> familles `gdelt_/gdacs_/eq_/air_/em_/noaa_/storm_` sont calculées et stockées
+> dans `features_dataset` (inspection), mais **exclues du jeu de features du
+> modèle** : elles sont mises à 0 hors Lacor à l'inférence (décalage
+> entraînement/service) et les volumes de presse GDELT agissaient comme un proxy
+> temporel spurieux. Le modèle s'appuie donc sur ~49 features robustes
+> (météo + charge + temporel + historique des coupures), identiques en
+> entraînement et en service pour tous les hôpitaux.
 
 ## Métriques et features importantes
 
 Les métriques exactes du run courant sont écrites par `train_baseline.py` dans `models/training_summary.json` (modèle gagnant, hyperparamètres, F1 CV, accuracy, precision, recall, ROC AUC, Brier brut + calibré).
 
-**Run courante** (`models/training_summary.json`) :
-- **Modèle gagnant : LightGBM** (`n_estimators=300`, `max_depth=-1`, `learning_rate=0.05`, `scale_pos_weight=15`, `subsample=0.8`, `colsample_bytree=0.8`)
-- Hold-out test (brut)    : F1 = 0.85 · ROC AUC = 0.999 · Brier = 0.0014 · Precision = 0.86 · Recall = 0.84
-- Hold-out test (calibré) : F1 = 0.88 · ROC AUC = 0.9996 · Brier = 0.0015 · Precision = 0.95 · Recall = 0.82
+**Run courante** (`models/training_summary.json`, `--scope real`, 49 features, signaux externes exclus) :
+- **Modèle gagnant : RandomForest** (`n_estimators=300`, `max_depth=25`, `min_samples_leaf=8`, `class_weight={0:1, 1:10}`)
+- Hold-out test (brut)    : F1 = 0.82 · ROC AUC = 0.99 · Brier = 0.034 · Precision = 0.82 · Recall = 0.82
+- Hold-out test (calibré, servi) : F1 = 0.77 · ROC AUC = 0.98 · Brier = 0.031 · Precision = 0.84 · Recall = 0.72
+
+> Ces chiffres portent **uniquement sur des coupures réellement observées** (Lacor,
+> hold-out n=1752, 9.4 % de coupures). Ils sont plus bas — mais honnêtes — que les
+> ~0.88 de l'ancienne run `--scope all`, qui étaient gonflés par des coupures
+> synthétiques (F1 synthétique = 1.0) et un proxy temporel GDELT. La calibration
+> est sélectionnée automatiquement (ici isotonique : Brier 0.034 → 0.031).
 
 Les classements de features sont disponibles ici :
 - `models/feature_importance.csv` — importance MDI du modèle gagnant
 - `models/shap_feature_importance.csv` — importance SHAP globale (|mean|)
 
-Le modèle calibré (`calibrated_rf.joblib`) produit des probabilités fiables (calibration isotonique sur 3 folds temporels). C'est lui qui est chargé par défaut dans l'app. Le nom de fichier `calibrated_rf.joblib` est conservé pour rétro-compatibilité, mais il contient bien le **gagnant** courant (LightGBM dans la run actuelle).
+Le fichier `calibrated_model.joblib` est chargé par défaut dans l'app. Il contient le **gagnant** courant de la comparaison RF / XGBoost / LightGBM, servi avec la stratégie de calibration retenue (`auto` : aucune / isotonique / sigmoïde selon le Brier de validation — `calibration_method` dans `training_summary.json`). L'app sait encore lire l'ancien nom `calibrated_rf.joblib` en repli.
 
 ## Sources de données
 

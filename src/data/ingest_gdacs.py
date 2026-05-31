@@ -35,7 +35,7 @@ Sortie : `data/raw/gdacs_<hospital>.csv`
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import requests
@@ -182,7 +182,7 @@ def run(
 
 def run_live(window_days: int = 30) -> None:
     """Récupère une fenêtre glissante récente (quasi temps réel)."""
-    end = datetime.utcnow()
+    end = datetime.now(timezone.utc).replace(tzinfo=None)
     start = end - timedelta(days=window_days)
     run(year=None, start=start, end=end)
 

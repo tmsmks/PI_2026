@@ -60,28 +60,14 @@ from time import perf_counter
 import numpy as np
 import pandas as pd
 
-from src.utils.config import PROCESSED_DIR, FEATURES_DIR
-from src.utils.io import load_csv, save_csv
+from src.utils.config import (
+    FEATURES_DIR,
+    PROCESSED_DIR,
+    UGANDA_PUBLIC_HOLIDAYS_2022,
+)
+from src.utils.io import load_csv, load_table, save_table
 
 logger = logging.getLogger(__name__)
-
-
-UGANDA_PUBLIC_HOLIDAYS_2022 = [
-    "2022-01-01",  # New Year
-    "2022-01-26",  # NRM Liberation Day
-    "2022-02-16",  # Archbishop Janani Luwum Day
-    "2022-03-08",  # International Women's Day
-    "2022-04-15",  # Good Friday
-    "2022-04-18",  # Easter Monday
-    "2022-05-01",  # Labour Day
-    "2022-05-02",  # Eid al-Fitr (approx.)
-    "2022-06-03",  # Martyrs' Day
-    "2022-06-09",  # National Heroes' Day
-    "2022-07-09",  # Eid al-Adha (approx.)
-    "2022-10-09",  # Independence Day
-    "2022-12-25",  # Christmas
-    "2022-12-26",  # Boxing Day
-]
 
 
 def add_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -133,11 +119,25 @@ def add_energy_source_features(df: pd.DataFrame) -> pd.DataFrame:
             .transform(lambda s: s.rolling(6, min_periods=1).mean())
         )
 
-    # Historique récent de coupures
+    # Historique récent de coupures : on shifte de 1 heure pour éviter
+    # d'inclure l'observation courante (sinon la cible fuite directement
+    # dans la feature). Ces colonnes restent listées dans COLS_TO_DROP
+    # côté training, mais le calcul propre les rend réutilisables pour
+    # l'inspection / l'analyse historique sans risque.
     if "is_outage" in df.columns:
-        grouped_outages = df.groupby("hospital", sort=False)["is_outage"]
-        df["recent_outages_6h"] = grouped_outages.transform(lambda s: s.rolling(6, min_periods=1).sum())
-        df["recent_outages_24h"] = grouped_outages.transform(lambda s: s.rolling(24, min_periods=1).sum())
+        shifted_outage = (
+            df.groupby("hospital", sort=False)["is_outage"]
+            .shift(1)
+            .fillna(0)
+        )
+        df["recent_outages_6h"] = (
+            shifted_outage.groupby(df["hospital"], sort=False)
+            .transform(lambda s: s.rolling(6, min_periods=1).sum())
+        )
+        df["recent_outages_24h"] = (
+            shifted_outage.groupby(df["hospital"], sort=False)
+            .transform(lambda s: s.rolling(24, min_periods=1).sum())
+        )
 
     return df
 
@@ -168,7 +168,9 @@ def add_outage_history_features(df: pd.DataFrame) -> pd.DataFrame:
 
         grp["outage_frequency_7d"] = s.rolling(168, min_periods=1).sum()
         outage_hours_7d = s.rolling(168, min_periods=1).sum()
-        outage_events_7d = outage_starts.shift(1).fillna(False).rolling(168, min_periods=1).sum()
+        # shift(fill_value=False) garde le dtype booléen (pas de NaN), ce qui
+        # évite le FutureWarning pandas de downcasting object → bool sur fillna.
+        outage_events_7d = outage_starts.shift(1, fill_value=False).rolling(168, min_periods=1).sum()
         grp["avg_outage_duration_7d"] = (
             outage_hours_7d / outage_events_7d.replace(0, np.nan)
         ).fillna(0)
@@ -178,10 +180,16 @@ def add_outage_history_features(df: pd.DataFrame) -> pd.DataFrame:
         grp["outage_trend_7d"] = (recent_7d / prev_7d.replace(0, np.nan)).fillna(1.0).clip(0, 10)
         return grp
 
-    df = (
-        df.groupby("hospital", sort=False, group_keys=False)
-        .apply(_per_hospital_outage_features)
-    )
+    # Boucle explicite par hôpital plutôt que `groupby.apply` : évite le
+    # FutureWarning « apply operated on the grouping columns » (pandas
+    # exclura bientôt la colonne de groupe) et garde un comportement stable.
+    # `reindex(original_index)` restitue l'ordre exact des lignes en entrée.
+    original_index = df.index
+    parts = [
+        _per_hospital_outage_features(grp.copy())
+        for _, grp in df.groupby("hospital", sort=False)
+    ]
+    df = pd.concat(parts).reindex(original_index)
     df = df.drop(columns=["_shifted_outage"])
 
     return df
@@ -211,15 +219,20 @@ def add_advanced_meteo_features(df: pd.DataFrame) -> pd.DataFrame:
     if "cloud_cover" in df.columns:
         df["cloud_cover_pct"] = df["cloud_cover"]
     else:
-        # Proxy : inverse du ratio rayonnement solaire / max théorique
+        # Proxy : inverse du ratio rayonnement solaire / max théorique.
+        # Restriction aux heures de jour : la nuit, shortwave_radiation=0
+        # systématiquement → l'ancien proxy renvoyait 100% (ciel "couvert")
+        # même par nuit claire. On garde une valeur neutre (50%) hors plage.
         max_solar = (
             df.groupby("hospital", sort=False)["shortwave_radiation"]
             .transform(lambda s: s.rolling(24 * 30, min_periods=24).max())
         )
-        df["cloud_cover_pct"] = (
+        cloud_day = (
             (1 - df["shortwave_radiation"] / max_solar.replace(0, np.nan))
-            .fillna(0).clip(0, 1) * 100
+            .clip(0, 1) * 100
         )
+        is_day = (df.get("hour", 12) >= 7) & (df.get("hour", 12) <= 19)
+        df["cloud_cover_pct"] = cloud_day.where(is_day, 50.0).fillna(50.0)
 
     # Point de rosée (si disponible, sinon approximation Magnus)
     if "dew_point_2m" not in df.columns:
@@ -412,9 +425,90 @@ def add_gdacs_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# ── API publique pour l'app Streamlit ──────────────────────────────
+# Réutilise les blocs de FE multi-hôpitaux ci-dessus pour qu'un consommateur
+# mono-hôpital (Streamlit) puisse appliquer EXACTEMENT le même calcul
+# que le pipeline d'entraînement. Élimine la duplication historique
+# `_apply_feature_engineering` dans app.py.
+
+
+def apply_feature_engineering_single(
+    df: pd.DataFrame,
+    hospital_key: str = "__single__",
+) -> pd.DataFrame:
+    """Applique le feature engineering complet à un DataFrame *mono-hôpital*.
+
+    Garantit la cohérence stricte avec `run()` (pipeline d'entraînement) :
+      - temporel (hour, day_of_week, month, cyclique, fériés UG)
+      - charge (rolling, diff, peak_ratio)
+      - sources d'énergie (solar/generator/grid + recent_outages_*h)
+      - météo de base + interactions
+      - météo avancée (cloud_cover_pct fallback jour-only, dew_point Magnus…)
+      - historique coupures (hours_since_last_outage, …, outage_trend_7d)
+
+    Hypothèses sur `df` :
+      - colonne `datetime` présente ;
+      - éventuelles colonnes consommation (`total_load_kw`, `solar_pv_kw`,
+        `base_load_kw`, `generators_kw`, `grid_available[_ratio]`) et météo
+        (`temperature_2m`, etc.) ; manquantes ⇒ 0 par défaut.
+
+    Renvoie une copie ; n'ajoute PAS `hospital` à la sortie.
+    """
+    df = df.copy()
+    df["datetime"] = pd.to_datetime(df["datetime"])
+    df["hour"] = df["datetime"].dt.hour
+    df["day_of_week"] = df["datetime"].dt.dayofweek
+    df["month"] = df["datetime"].dt.month
+
+    # `hospital` temporaire pour réutiliser les groupby des fonctions
+    # ci-dessus (coût négligeable pour 1 groupe).
+    had_hospital = "hospital" in df.columns
+    if not had_hospital:
+        df["hospital"] = hospital_key
+
+    # Pré-remplir colonnes manquantes : l'app peut partir d'un df ERIC/NYC
+    # sans météo locale, ou d'un raw Lacor sans certaines colonnes
+    # dérivées. On garantit la présence de tout ce qui sera lu.
+    for mcol in [
+        "temperature_2m", "relative_humidity_2m", "wind_speed_10m",
+        "wind_gusts_10m", "precipitation", "surface_pressure",
+        "shortwave_radiation", "cape", "weathercode",
+    ]:
+        if mcol not in df.columns:
+            df[mcol] = 0.0
+
+    # `grid_availability_ratio` est calculé par preprocessing pour Lacor ;
+    # quand l'app part d'un raw site mono-hôpital, on le reconstruit depuis
+    # `grid_available` (Lacor) si présent.
+    if "grid_available" in df.columns and "grid_availability_ratio" not in df.columns:
+        df["grid_availability_ratio"] = df["grid_available"]
+
+    df = add_temporal_features(df)
+    df = add_load_features(df)
+    df = add_energy_source_features(df)
+    df = add_meteo_features(df)
+    df = add_advanced_meteo_features(df)
+    df = add_outage_history_features(df)
+
+    # Defaults pour les colonnes "advanced" dont le pipeline complet
+    # remplit certaines valeurs en se basant sur la météo brute, mais
+    # qui peuvent rester NaN dans le contexte app.
+    if "visibility_m" not in df.columns:
+        df["visibility_m"] = 10_000.0
+    if "evapotranspiration" not in df.columns:
+        df["evapotranspiration"] = 0.0
+
+    if not had_hospital:
+        df = df.drop(columns=["hospital"])
+
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    df[numeric_cols] = df[numeric_cols].fillna(0)
+    return df
+
+
 def run() -> None:
     t0 = perf_counter()
-    df = load_csv(PROCESSED_DIR / "hospital_merged.csv")
+    df = load_table(PROCESSED_DIR / "hospital_merged.csv")
     df["datetime"] = pd.to_datetime(df["datetime"])
     df = df.sort_values(["hospital", "datetime"]).reset_index(drop=True)
 
@@ -456,7 +550,7 @@ def run() -> None:
     numeric_cols = df.select_dtypes(include=[np.number]).columns
     df[numeric_cols] = df[numeric_cols].fillna(0)
 
-    save_csv(df, FEATURES_DIR / "features_dataset.csv")
+    save_table(df, FEATURES_DIR / "features_dataset.csv")
 
     feature_cols = [c for c in df.columns if c not in ("datetime", "is_outage")]
     logger.info("Feature engineering terminé : %d features", len(feature_cols))
