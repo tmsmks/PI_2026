@@ -10,10 +10,11 @@ dist/
 build/
 .ipynb_checkpoints/
 
-# Datasets volumineux régénérés par le pipeline (gardés en local uniquement).
-# Reproductibles via `python run_pipeline.py` ; ils polluaient `git status`
-# (CSV réécrits à chaque run). Pour cesser de suivre ceux déjà versionnés :
-#   git rm -r --cached data/raw data/processed data/features
-data/raw/
+# Datasets volumineux régénérés par le pipeline (gardés en local uniquement),
+# reproductibles via `python run_pipeline.py`. On conserve toutefois les
+# SOURCES non régénérables par API (*.xlsx : Lacor, Phoenix), seul intrant
+# réellement irremplaçable.
+data/raw/*
+!data/raw/*.xlsx
 data/processed/
 data/features/
