@@ -40,6 +40,7 @@ from src.utils.config import (
     USGS_MIN_MAGNITUDE,
     USGS_SEARCH_RADIUS_KM,
 )
+from src.utils.http import http_get
 from src.utils.io import save_csv
 
 logger = logging.getLogger(__name__)
@@ -80,7 +81,7 @@ def fetch_earthquakes(
         lat, lon, radius_km, min_magnitude,
         start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"),
     )
-    resp = requests.get(USGS_EARTHQUAKE_BASE, params=params, timeout=60)
+    resp = http_get(USGS_EARTHQUAKE_BASE, params=params, timeout=60)
     resp.raise_for_status()
     data = resp.json()
 

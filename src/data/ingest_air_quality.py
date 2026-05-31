@@ -28,6 +28,7 @@ from src.utils.config import (
     HOSPITAL_LOCATIONS,
     RAW_DIR,
 )
+from src.utils.http import http_get
 from src.utils.io import save_csv
 
 logger = logging.getLogger(__name__)
@@ -52,7 +53,7 @@ def fetch_air_quality(
         "Open-Meteo Air Quality lat=%.2f lon=%.2f [%s → %s]",
         lat, lon, start_date, end_date,
     )
-    resp = requests.get(AIR_QUALITY_BASE, params=params, timeout=60)
+    resp = http_get(AIR_QUALITY_BASE, params=params, timeout=60)
     resp.raise_for_status()
     data = resp.json()
 

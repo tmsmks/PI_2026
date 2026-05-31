@@ -44,6 +44,7 @@ from src.utils.config import (
     NOAA_STORM_FILTERS,
     RAW_DIR,
 )
+from src.utils.http import http_get
 from src.utils.io import save_csv
 
 logger = logging.getLogger(__name__)
@@ -63,7 +64,7 @@ def _resolve_details_filename(year: int) -> str:
     le répertoire HTML et on prend la version la plus récente de l'année.
     """
     logger.info("Résolution du fichier NOAA pour l'année %d…", year)
-    resp = requests.get(NOAA_STORM_BASE, timeout=60)
+    resp = http_get(NOAA_STORM_BASE, timeout=60)
     resp.raise_for_status()
 
     candidates = [
@@ -95,7 +96,7 @@ def _download_details(year: int) -> Path:
     url = f"{NOAA_STORM_BASE}{filename}"
 
     logger.info("Téléchargement %s …", url)
-    with requests.get(url, stream=True, timeout=120) as r:
+    with http_get(url, stream=True, timeout=120) as r:
         r.raise_for_status()
         with open(gz_path, "wb") as f:
             shutil.copyfileobj(r.raw, f)

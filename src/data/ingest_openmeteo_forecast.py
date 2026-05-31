@@ -29,6 +29,7 @@ from src.utils.config import (
     METEO_HOURLY_VARS,
     RAW_DIR,
 )
+from src.utils.http import http_get
 from src.utils.io import save_csv
 
 logger = logging.getLogger(__name__)
@@ -51,7 +52,7 @@ def fetch_forecast(
         "Open-Meteo Forecast lat=%.2f lon=%.2f horizon=%d jours",
         lat, lon, forecast_days,
     )
-    resp = requests.get(METEO_FORECAST_BASE, params=params, timeout=60)
+    resp = http_get(METEO_FORECAST_BASE, params=params, timeout=60)
     resp.raise_for_status()
     data = resp.json()
 

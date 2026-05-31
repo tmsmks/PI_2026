@@ -12,6 +12,7 @@ import pandas as pd
 import requests
 
 from src.utils.config import METEO_BASE, METEO_HOURLY_VARS, HOSPITAL_LOCATIONS, RAW_DIR
+from src.utils.http import http_get
 from src.utils.io import save_csv
 
 logger = logging.getLogger(__name__)
@@ -33,7 +34,7 @@ def fetch_meteo_archive(
         "timezone": "auto",
     }
     logger.info("Requête Open-Meteo Archive lat=%.2f lon=%.2f [%s → %s]", lat, lon, start_date, end_date)
-    resp = requests.get(METEO_BASE, params=params, timeout=60)
+    resp = http_get(METEO_BASE, params=params, timeout=60)
     resp.raise_for_status()
     data = resp.json()
 

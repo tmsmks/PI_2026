@@ -69,6 +69,7 @@ from src.utils.config import (
     HOSPITAL_LOCATIONS,
     RAW_DIR,
 )
+from src.utils.http import http_get
 from src.utils.io import save_csv
 
 logger = logging.getLogger(__name__)
@@ -110,7 +111,7 @@ def _call(endpoint: str, token: str, params: dict[str, Any]) -> dict | None:
     url = ELECTRICITYMAPS_BASE + endpoint
     headers = {"auth-token": token}
     try:
-        resp = requests.get(url, headers=headers, params=params, timeout=DEFAULT_TIMEOUT)
+        resp = http_get(url, headers=headers, params=params, timeout=DEFAULT_TIMEOUT)
     except requests.RequestException as exc:
         logger.warning("Electricity Maps %s : erreur réseau (%s)", endpoint, exc)
         return None

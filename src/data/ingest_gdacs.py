@@ -48,6 +48,7 @@ from src.utils.config import (
     HOSPITAL_LOCATIONS,
     RAW_DIR,
 )
+from src.utils.http import http_get
 from src.utils.io import save_csv
 
 logger = logging.getLogger(__name__)
@@ -68,7 +69,7 @@ def fetch_gdacs_events(iso3: str, start: datetime, end: datetime) -> pd.DataFram
         iso3.upper(), params["fromDate"], params["toDate"],
     )
     try:
-        resp = requests.get(GDACS_BASE, params=params, timeout=60)
+        resp = http_get(GDACS_BASE, params=params, timeout=60)
         resp.raise_for_status()
         data = resp.json()
     except (requests.RequestException, ValueError) as exc:
