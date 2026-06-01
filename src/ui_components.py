@@ -13,47 +13,6 @@ import streamlit as st
 from src.ui_content import FEATURE_CATEGORIES, feature_label, get_feature_category
 
 
-def render_data_sources_badges(sources: list[dict]) -> str:
-    """Rend une grille de badges HTML pour les sources d'un hôpital."""
-    status_label = {
-        "primary":   ("Donnée primaire",    "#2ecc71"),
-        "available": ("Disponible",          "#3498db"),
-        "context":   ("Contexte — non utilisé par le modèle", "#95a5a6"),
-        "synthetic": ("Synthétique/cloné",  "#f39c12"),
-        "missing":   ("Manquant",            "#e74c3c"),
-    }
-    items = []
-    for s in sources:
-        st_lbl, st_col = status_label.get(s["status"], ("?", "#95a5a6"))
-        items.append(
-            f"""
-            <div style='border:1px solid #e0e0e0;border-left:4px solid {s["color"]};
-                        border-radius:8px;padding:8px 12px;background:white;
-                        display:flex;flex-direction:column;gap:2px'>
-                <div style='display:flex;align-items:center;gap:8px;
-                            font-size:13px;font-weight:600;color:#2c3e50'>
-                    <span style='font-size:16px'>{s["emoji"]}</span>
-                    <span>{s["label"]}</span>
-                </div>
-                <div style='font-size:11px;color:#666;margin-left:24px'>
-                    {s["detail"]}
-                </div>
-                <div style='margin-left:24px'>
-                    <span style='font-size:10px;font-weight:700;
-                                 color:{st_col};text-transform:uppercase;
-                                 letter-spacing:0.5px'>● {st_lbl}</span>
-                </div>
-            </div>
-            """
-        )
-    return (
-        "<div style='display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));"
-        "gap:8px;margin-top:10px'>"
-        + "".join(items)
-        + "</div>"
-    )
-
-
 def risk_display(proba: float):
     if proba > 0.7:
         return "ÉLEVÉ", "#e74c3c", "🔴"
