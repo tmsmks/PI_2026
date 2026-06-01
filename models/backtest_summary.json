@@ -1,0 +1,53 @@
+{
+  "model": "RandomForest",
+  "n_features": 49,
+  "decision_threshold": 0.5,
+  "holdout_chrono_train1_9_test10_12": {
+    "accuracy": 0.9579,
+    "precision": 0.8069,
+    "recall": 0.7512,
+    "f1": 0.778,
+    "roc_auc": 0.9769,
+    "brier": 0.0404
+  },
+  "walk_forward_aggregate": {
+    "f1": {
+      "mean": 0.7506,
+      "std": 0.0432,
+      "min": 0.7091,
+      "max": 0.8112
+    },
+    "precision": {
+      "mean": 0.7803,
+      "std": 0.0428,
+      "min": 0.7101,
+      "max": 0.8406
+    },
+    "recall": {
+      "mean": 0.725,
+      "std": 0.0564,
+      "min": 0.65,
+      "max": 0.8116
+    },
+    "roc_auc": {
+      "mean": 0.9605,
+      "std": 0.0295,
+      "min": 0.9163,
+      "max": 0.9903
+    },
+    "brier": {
+      "mean": 0.0458,
+      "std": 0.0119,
+      "min": 0.03,
+      "max": 0.0662
+    },
+    "accuracy": {
+      "mean": 0.9529,
+      "std": 0.0099,
+      "min": 0.9355,
+      "max": 0.9637
+    }
+  },
+  "walk_forward_n_folds": 6,
+  "note": "\u00c9valuation sur Lacor uniquement (seul site \u00e0 coupures r\u00e9elles). Le walk-forward mesure la stabilit\u00e9 dans le temps ; il ne valide PAS la g\u00e9n\u00e9ralisation \u00e0 d'autres sites (n\u00e9cessiterait des donn\u00e9es r\u00e9elles multi-sites)."
+}

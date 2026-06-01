@@ -148,6 +148,21 @@ Les métriques exactes du run courant sont écrites par `train_baseline.py` dans
 > synthétiques (F1 synthétique = 1.0) et un proxy temporel GDELT. La calibration
 > est sélectionnée automatiquement (ici isotonique : Brier 0.034 → 0.031).
 
+### Validation temporelle (généralisation dans le temps)
+
+Comme on ne dispose que d'**un site × une année**, la robustesse temporelle est
+évaluée explicitement par [`src/models/backtest.py`](src/models/backtest.py)
+(`python -m src.models.backtest`) — bien plus honnête qu'un hold-out unique :
+
+- **Hold-out chronologique** (train mois 1–9 → test oct–déc) : F1 = 0.78 · ROC AUC = 0.98 · Recall = 0.75 · Brier = 0.040
+- **Backtest walk-forward** (origine glissante, 6 folds mensuels) : F1 = **0.75 ± 0.04** [0.71–0.81] · Recall = 0.73 · ROC AUC = **0.96 ± 0.03** · Brier = 0.046
+
+Lecture : la discrimination (ROC AUC) reste élevée toute l'année ; le F1 progresse
+avec l'historique disponible (≈0.71 aux premiers mois → ≈0.81 en fin d'année).
+⚠️ Ceci mesure la stabilité **dans le temps sur Lacor** — pas la généralisation à
+**d'autres sites** (qui exigerait des coupures réelles multi-sites). Détail par
+mois : `models/backtest_by_month.csv` + `models/backtest_summary.json`.
+
 Les classements de features sont disponibles ici :
 - `models/feature_importance.csv` — importance MDI du modèle gagnant
 - `models/shap_feature_importance.csv` — importance SHAP globale (|mean|)
