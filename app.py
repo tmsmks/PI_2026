@@ -4,12 +4,11 @@ Deux modes : Analyse historique + Simulation manuelle.
 """
 
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from pathlib import Path
 
 import json
 
-import joblib
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -24,13 +23,24 @@ sys.path.insert(0, str(ROOT))
 
 from src.utils.config import (
     COLS_TO_DROP,
-    EXTERNAL_SIGNAL_PREFIXES,
-    FEATURES_DIR,
     MODELS_DIR,
-    UGANDA_PUBLIC_HOLIDAYS_2022,
     drop_external_signal_columns,
 )
 from src.utils.hospitals import HOSPITAL_DISPLAY as _HOSPITAL_DISPLAY_FULL
+from src.app_data import (
+    HOSPITAL_DISPLAY,
+    _features_file_mtime,
+    _forecast_file_mtime,
+    _model_file_mtime,
+    detect_hospital_data_sources,
+    load_electricitymaps_snapshot,
+    load_global_shap_importance,
+    load_hospital_data,
+    load_lacor_features,
+    load_meteo_forecast,
+    load_model,
+    load_shap_explainer,
+)
 
 # ── Configuration ────────────────────────────────────────────────────
 
@@ -40,13 +50,8 @@ st.set_page_config(
     layout="wide",
 )
 
-# HOSPITAL_DISPLAY est centralisé dans src/utils/hospitals.py.
-# On filtre ici les hôpitaux marqués `ui_hidden` pour ne garder que
-# ceux pertinents pour l app (Phoenix est un site benchmark interne).
-HOSPITAL_DISPLAY = {
-    k: v for k, v in _HOSPITAL_DISPLAY_FULL.items()
-    if not v.get("ui_hidden")
-}
+# HOSPITAL_DISPLAY (catalogue filtré des hôpitaux visibles) est désormais
+# défini dans src/app_data.py et importé ci-dessus.
 
 # N'afficher que les hôpitaux avec données de consommation réelles
 # (pas de profil estimé/cloné).
@@ -70,15 +75,9 @@ from src.ui_content import (
     DATA_SOURCES,
     FEATURE_CATEGORIES,
     FEATURE_LABELS,
-    MODEL_USED_SOURCE_TYPES,
     _source_used_by_model,
-    feature_label,
-    get_feature_category,
 )
 from src.ui_components import (
-    category_badge_html,
-    render_data_sources_badges,
-    risk_display,
     show_factors,
     show_risk_result,
     show_shap_waterfall,
@@ -88,148 +87,10 @@ from src.ui_components import (
 
 # ── Chargement ───────────────────────────────────────────────────────
 
-ERIC_DIR = ROOT / "data" / "raw" / "eric"
-
 
 # Noms de fichiers modèle : nouveaux noms neutres (le gagnant peut être RF,
 # XGBoost ou LightGBM), avec repli sur les anciens `*_rf.joblib` pour la
 # rétro-compatibilité tant que le pipeline n'a pas été ré-exécuté.
-_CALIBRATED_MODEL_NAMES = ("calibrated_model.joblib", "calibrated_rf.joblib")
-_BASELINE_MODEL_NAMES = ("baseline_model.joblib", "baseline_rf.joblib")
-
-
-def _resolve_model_path(names: tuple[str, ...]) -> Path | None:
-    """Renvoie le premier fichier modèle existant parmi `names`, ou None."""
-    for name in names:
-        p = MODELS_DIR / name
-        if p.exists():
-            return p
-    return None
-
-
-def _model_file_mtime() -> float:
-    """Retourne le mtime du modèle pour invalider le cache quand le fichier change."""
-    for names in (_CALIBRATED_MODEL_NAMES, _BASELINE_MODEL_NAMES):
-        p = _resolve_model_path(names)
-        if p is not None:
-            return p.stat().st_mtime
-    return 0.0
-
-
-@st.cache_resource
-def load_model(_mtime: float = 0.0):
-    calibrated_path = _resolve_model_path(_CALIBRATED_MODEL_NAMES)
-    baseline_path = _resolve_model_path(_BASELINE_MODEL_NAMES)
-    summary_path = MODELS_DIR / "training_summary.json"
-
-    winner_name = "?"
-    if summary_path.exists():
-        try:
-            with open(summary_path) as f:
-                winner_name = json.load(f).get("winner", "?")
-        except Exception:
-            pass
-
-    if calibrated_path is not None:
-        try:
-            model = joblib.load(calibrated_path)
-            st.sidebar.success(f"Modèle : **{winner_name}** (calibré)")
-            return model
-        except Exception as e:
-            st.sidebar.warning(f"Échec du modèle calibré : {e} — fallback sur le brut")
-
-    if baseline_path is not None:
-        try:
-            model = joblib.load(baseline_path)
-            st.sidebar.info(f"Modèle : **{winner_name}** (brut)")
-            return model
-        except Exception as e:
-            st.error(f"**Erreur au chargement du modèle** : {e}")
-            st.stop()
-
-    st.error(
-        "**Aucun modèle trouvé.**\n\n"
-        "Exécutez d'abord le pipeline d'entraînement :\n"
-        "```bash\npython run_pipeline.py\n```"
-    )
-    st.stop()
-
-
-@st.cache_resource
-def load_shap_explainer(_mtime: float = 0.0):
-    explainer_path = MODELS_DIR / "shap_explainer.joblib"
-    if not explainer_path.exists():
-        return None
-    try:
-        return joblib.load(explainer_path)
-    except Exception:
-        return None
-
-
-def _features_file_mtime() -> float:
-    # On regarde parquet ET CSV : le plus récent suffit pour invalider
-    # le cache Streamlit dès que l'un est régénéré.
-    candidates = [
-        FEATURES_DIR / "features_dataset.parquet",
-        FEATURES_DIR / "features_dataset.csv",
-    ]
-    mtimes = [p.stat().st_mtime for p in candidates if p.exists()]
-    return max(mtimes) if mtimes else 0.0
-
-
-@st.cache_data
-def load_lacor_features(_mtime: float = 0.0):
-    from src.utils.io import load_table
-    csv_path = FEATURES_DIR / "features_dataset.csv"
-    parquet_path = FEATURES_DIR / "features_dataset.parquet"
-    if not csv_path.exists() and not parquet_path.exists():
-        st.error(
-            f"**Données Lacor introuvables** : `{csv_path}`\n\n"
-            "Exécutez d'abord le pipeline de preprocessing :\n"
-            "```bash\npython run_pipeline.py\n```"
-        )
-        st.stop()
-    try:
-        # `load_table` privilégie parquet (~10× plus rapide qu'un CSV de
-        # 100 colonnes × 100k lignes), fallback CSV transparent.
-        df = load_table(csv_path)
-        df["datetime"] = pd.to_datetime(df["datetime"])
-        return df
-    except Exception as e:
-        st.error(f"**Erreur au chargement des données Lacor** : {e}")
-        st.stop()
-
-
-def _apply_feature_engineering(df: pd.DataFrame) -> pd.DataFrame:
-    """Applique le feature engineering complet sur un DataFrame brut hospitalier.
-
-    Délègue à `apply_feature_engineering_single` (src.features.build_features)
-    pour garantir une parité STRICTE avec le pipeline d'entraînement —
-    l'ancienne implémentation locale dupliquait ~150 lignes et dérivait
-    progressivement (cf. P4.4).
-    """
-    from src.features.build_features import apply_feature_engineering_single
-    return apply_feature_engineering_single(df)
-
-
-def _forecast_file_mtime(hospital_key: str) -> float:
-    p = ROOT / "data" / "raw" / f"meteo_forecast_{hospital_key}.csv"
-    return p.stat().st_mtime if p.exists() else 0.0
-
-
-@st.cache_data
-def load_meteo_forecast(hospital_key: str, _mtime: float = 0.0) -> pd.DataFrame | None:
-    """Charge les prévisions Open-Meteo pour un hôpital (fichier généré par
-    `ingest_openmeteo_forecast.run()`)."""
-    path = ROOT / "data" / "raw" / f"meteo_forecast_{hospital_key}.csv"
-    if not path.exists():
-        return None
-    try:
-        df = pd.read_csv(path)
-        df["datetime"] = pd.to_datetime(df["datetime"])
-        return df
-    except Exception:
-        return None
 
 
 def _match_similar_historical_rows_bulk(
@@ -372,345 +233,10 @@ def _adjust_proba_array_for_hospital(
     return np.clip(probas * factor, 0.01, 0.99)
 
 
-@st.cache_data
-def load_eric_features(eric_code: str, hospital_info: dict) -> pd.DataFrame | None:
-    csv_path = ERIC_DIR / f"eric_{eric_code}_hourly.csv"
-    if not csv_path.exists():
-        return None
-    try:
-        df = pd.read_csv(csv_path)
-    except Exception as e:
-        st.warning(f"Impossible de lire les données ERIC `{eric_code}` : {e}")
-        return None
-
-    # Récupérer la météo : on cherche d'abord un fichier propre à
-    # l'hôpital (vraie météo locale Open-Meteo), sinon fallback sur Lacor
-    # avec offset de température lié à la latitude.
-    hospital_key = next(
-        (k for k, v in HOSPITAL_DISPLAY.items()
-         if v.get("eric_code") == eric_code),
-        None,
-    )
-    local_meteo = (
-        ROOT / "data" / "raw" / f"meteo_{hospital_key}.csv"
-        if hospital_key else None
-    )
-
-    df["datetime"] = pd.to_datetime(df["datetime"])
-
-    if local_meteo and local_meteo.exists():
-        meteo = pd.read_csv(local_meteo)
-        meteo["datetime"] = pd.to_datetime(meteo["datetime"])
-        meteo_cols = [c for c in meteo.columns if c not in ("datetime", "hospital")]
-        meteo = (
-            meteo.sort_values("datetime")
-            .drop_duplicates(subset=["datetime"], keep="last")
-        )
-        # Alignement robuste par timestamp (évite les erreurs si longueurs différentes,
-        # ex. météo partielle 744 lignes vs ERIC 8760 lignes).
-        df = df.merge(meteo[["datetime", *meteo_cols]], on="datetime", how="left")
-    else:
-        lacor_meteo = ROOT / "data" / "raw" / "meteo_lacor_uganda.csv"
-        if lacor_meteo.exists():
-            meteo = pd.read_csv(lacor_meteo)
-            meteo["datetime"] = pd.to_datetime(meteo["datetime"])
-            lat = hospital_info.get("lat", 51.5)
-            temp_offset = (51.5 - lat) * 0.15
-            meteo["temperature_2m"] = meteo["temperature_2m"] - temp_offset
-            meteo_cols = [c for c in meteo.columns if c not in ("datetime", "hospital")]
-            meteo = (
-                meteo.sort_values("datetime")
-                .drop_duplicates(subset=["datetime"], keep="last")
-            )
-            df = df.merge(meteo[["datetime", *meteo_cols]], on="datetime", how="left")
-
-    df = _apply_feature_engineering(df)
-    return df
-
-
-@st.cache_data
-def load_africa_grid_features(hospital_key: str, hospital_info: dict) -> pd.DataFrame | None:
-    """Charge un profil hospitalier africain en clonant Lacor puis en
-    re-scaling sur `avg_load_kw`, en injectant la météo Open-Meteo locale
-    et le signal Electricity Maps (charge réseau temps réel) propres au
-    pays. Les autres signaux externes (GDELT/GDACS/USGS/AirQuality) sont
-    laissés au loader appelant qui les neutralise.
-
-    Justification : on n'a pas de relevé interne de consommation pour ces
-    hôpitaux. Le profil temporel reste celui de Lacor (variations
-    horaires/journalières/saisonnières d'un hôpital régional africain),
-    mais l'amplitude est mise à l'échelle de l'établissement et le contexte
-    météo + réseau local est injecté pour que la prédiction soit cohérente.
-    """
-    base = load_lacor_features(_features_file_mtime())
-    if base is None or base.empty:
-        return None
-    df = base.copy()
-    # NOTE : on conserve les timestamps 2022 d'origine pour que la météo
-    # locale 2022, l'historique Lacor 2022 et les features cycliques
-    # (month, hour_sin/cos, is_public_holiday) restent cohérents entre
-    # eux. L'ancien rebase vers `now()` désynchronisait la météo 2022
-    # avec le mois affiché (cf. analyse P1.2).
-    target_avg = float(hospital_info.get("avg_load_kw", 133))
-    lacor_avg = 133.0
-    scale = target_avg / lacor_avg if lacor_avg > 0 else 1.0
-
-    consumption_cols = [
-        "total_load_kw", "solar_pv_kw", "base_load_kw",
-        "generators_kw", "sterilization_kw",
-    ]
-    for col in consumption_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce") * scale
-
-    if not hospital_info.get("has_solar") and "solar_pv_kw" in df.columns:
-        df["solar_pv_kw"] = 0.0
-    if not hospital_info.get("has_generator"):
-        for col in ("generators_kw",):
-            if col in df.columns:
-                df[col] = 0.0
-
-    cols_to_zero = [
-        c for c in df.columns
-        if any(c.startswith(p) for p in EXTERNAL_SIGNAL_PREFIXES)
-    ]
-    if cols_to_zero:
-        df.loc[:, cols_to_zero] = 0
-
-    local_meteo = ROOT / "data" / "raw" / f"meteo_{hospital_key}.csv"
-    if local_meteo.exists():
-        try:
-            meteo = pd.read_csv(local_meteo)
-            meteo["datetime"] = pd.to_datetime(meteo["datetime"])
-            meteo_cols = [c for c in meteo.columns if c not in ("datetime", "hospital")]
-            df["datetime"] = pd.to_datetime(df["datetime"])
-            # Merge robuste par datetime (et plus par position) : la météo
-            # locale a la même résolution horaire que le profil Lacor
-            # mais ses lignes peuvent être décalées d'une heure ou avoir
-            # des trous.
-            df = df.drop(columns=[c for c in meteo_cols if c in df.columns])
-            df = pd.merge_asof(
-                df.sort_values("datetime"),
-                meteo[["datetime", *meteo_cols]].sort_values("datetime"),
-                on="datetime",
-                direction="nearest",
-                tolerance=pd.Timedelta("1h"),
-            )
-        except Exception as e:
-            st.warning(f"Météo locale {hospital_key} illisible : {e}")
-
-    em_path = ROOT / "data" / "raw" / f"electricitymaps_{hospital_key}.csv"
-    if em_path.exists():
-        try:
-            em = pd.read_csv(em_path)
-            em["datetime"] = pd.to_datetime(em["datetime"], errors="coerce")
-            em = em.dropna(subset=["datetime"]).sort_values("datetime")
-            if not em.empty:
-                df["datetime"] = pd.to_datetime(df["datetime"])
-                em_cols = [c for c in em.columns if c.startswith("em_")]
-                merged = pd.merge_asof(
-                    df.sort_values("datetime"),
-                    em[["datetime"] + em_cols].sort_values("datetime"),
-                    on="datetime",
-                    direction="nearest",
-                    tolerance=pd.Timedelta("24h"),
-                    suffixes=("", "_local"),
-                )
-                for col in em_cols:
-                    local_col = f"{col}_local"
-                    if local_col in merged.columns:
-                        merged[col] = np.where(
-                            merged[local_col].notna(),
-                            merged[local_col],
-                            merged[col],
-                        )
-                        merged = merged.drop(columns=[local_col])
-                df = merged
-        except Exception as e:
-            st.warning(f"Electricity Maps {hospital_key} illisible : {e}")
-
-    df = _apply_feature_engineering(df)
-    return df
-
-
-@st.cache_data
-def load_nyc_features(nyc_code: str, hospital_info: dict) -> pd.DataFrame | None:
-    """Charge les profils horaires NYC LL84 + météo locale Open-Meteo."""
-    nyc_dir = ROOT / "data" / "raw" / "nyc_ll84"
-    csv_path = nyc_dir / f"{nyc_code}_hourly.csv"
-    if not csv_path.exists():
-        return None
-    try:
-        df = pd.read_csv(csv_path)
-    except Exception as e:
-        st.warning(f"Impossible de lire les données NYC LL84 `{nyc_code}` : {e}")
-        return None
-
-    hospital_key = next(
-        (k for k, v in HOSPITAL_DISPLAY.items()
-         if v.get("nyc_code") == nyc_code),
-        None,
-    )
-    local_meteo = (
-        ROOT / "data" / "raw" / f"meteo_{hospital_key}.csv"
-        if hospital_key else None
-    )
-    df["datetime"] = pd.to_datetime(df["datetime"])
-
-    if local_meteo and local_meteo.exists():
-        meteo = pd.read_csv(local_meteo)
-        meteo["datetime"] = pd.to_datetime(meteo["datetime"])
-        meteo_cols = [c for c in meteo.columns if c not in ("datetime", "hospital")]
-        meteo = (
-            meteo.sort_values("datetime")
-            .drop_duplicates(subset=["datetime"], keep="last")
-        )
-        df = df.merge(meteo[["datetime", *meteo_cols]], on="datetime", how="left")
-
-    df = _apply_feature_engineering(df)
-    return df
-
-
 # ── Détection des sources de données disponibles par hôpital ───────
 # Permet d'afficher dans l'UI exactement de quelles sources chaque hôpital
 # bénéficie. Les fichiers sont regardés sur disque, donc ça reflète l'état
 # réel du projet.
-
-_RAW_DIR = ROOT / "data" / "raw"
-
-
-def detect_hospital_data_sources(hospital_key: str, hospital_info: dict) -> list[dict]:
-    """Renvoie la liste des sources de données réellement disponibles pour
-    cet hôpital, sous forme de dicts {label, emoji, color, status, detail}.
-    `status` ∈ {"primary", "available", "synthetic", "missing"}.
-    """
-    sources: list[dict] = []
-
-    # ── 1. Consommation électrique ─────────────────────────────────
-    if hospital_info.get("data_source") == "eric":
-        eric_code = hospital_info.get("eric_code", "")
-        eric_path = ROOT / "data" / "raw" / "eric" / f"eric_{eric_code}_hourly.csv"
-        if eric_path.exists():
-            sources.append({
-                "label": "Consommation NHS ERIC",
-                "emoji": "📊", "color": "#2ecc71", "status": "primary",
-                "detail": f"Données réelles · {eric_path.name}",
-            })
-        else:
-            sources.append({
-                "label": "Consommation NHS ERIC",
-                "emoji": "📊", "color": "#e74c3c", "status": "missing",
-                "detail": "Fichier introuvable",
-            })
-    elif hospital_info.get("data_source") == "nyc_ll84":
-        nyc_code = hospital_info.get("nyc_code", "")
-        nyc_path = ROOT / "data" / "raw" / "nyc_ll84" / f"{nyc_code}_hourly.csv"
-        if nyc_path.exists():
-            sources.append({
-                "label": "Consommation NYC Local Law 84",
-                "emoji": "📊", "color": "#2ecc71", "status": "primary",
-                "detail": f"data.cityofnewyork.us · {nyc_path.name}",
-            })
-        else:
-            sources.append({
-                "label": "Consommation NYC Local Law 84",
-                "emoji": "📊", "color": "#e74c3c", "status": "missing",
-                "detail": "Fichier introuvable",
-            })
-    elif hospital_key == "lacor_uganda":
-        if (_RAW_DIR / "lacor_clean.csv").exists():
-            sources.append({
-                "label": "Consommation Lacor (terrain)",
-                "emoji": "📊", "color": "#2ecc71", "status": "primary",
-                "detail": "Relevés horaires Hôpital Lacor 2022",
-            })
-    else:
-        sources.append({
-            "label": "Consommation (profil cloné Lacor + scaling)",
-            "emoji": "📊", "color": "#f39c12", "status": "synthetic",
-            "detail": f"Profil Lacor re-mis à l'échelle ({hospital_info.get('avg_load_kw', '?')} kW)",
-        })
-
-    # ── 2. Météo ──────────────────────────────────────────────────
-    meteo_path = _RAW_DIR / f"meteo_{hospital_key}.csv"
-    forecast_path = _RAW_DIR / f"meteo_forecast_{hospital_key}.csv"
-    if meteo_path.exists():
-        sources.append({
-            "label": "Météo Open-Meteo (historique)",
-            "emoji": "🌤️", "color": "#2ecc71", "status": "primary",
-            "detail": "Historique horaire 2022 (lat/lon hôpital)",
-        })
-    else:
-        sources.append({
-            "label": "Météo extrapolée Lacor (offset latitude)",
-            "emoji": "🌤️", "color": "#f39c12", "status": "synthetic",
-            "detail": "Compromis : météo Lacor avec correction de température",
-        })
-    if forecast_path.exists():
-        sources.append({
-            "label": "Météo Open-Meteo (prévisions)",
-            "emoji": "🔮", "color": "#3498db", "status": "available",
-            "detail": "Prévisions 7 jours pour mode anticipation",
-        })
-
-    # ── 3. Qualité de l'air ───────────────────────────────────────
-    if (_RAW_DIR / f"air_quality_{hospital_key}.csv").exists():
-        sources.append({
-            "label": "Qualité de l'air Open-Meteo",
-            "emoji": "🌫️", "color": "#1abc9c", "status": "context",
-            "detail": "PM2.5, PM10, ozone, CO, NO₂, dust, UV",
-        })
-
-    # ── 4. Electricity Maps (réseau local) ───────────────────────
-    em_path = _RAW_DIR / f"electricitymaps_{hospital_key}.csv"
-    if em_path.exists():
-        sources.append({
-            "label": "Electricity Maps (réseau local)",
-            "emoji": "⚡", "color": "#f1c40f", "status": "context",
-            "detail": "Zone locale, charge réseau, intensité carbone, mix",
-        })
-    else:
-        sources.append({
-            "label": "Electricity Maps (réseau local)",
-            "emoji": "⚡", "color": "#e74c3c", "status": "missing",
-            "detail": "Fichier introuvable (lancer ingest_electricitymaps)",
-        })
-
-    # ── 5. Sismique USGS ──────────────────────────────────────────
-    if (_RAW_DIR / f"usgs_earthquake_{hospital_key}.csv").exists():
-        sources.append({
-            "label": "Séismes USGS",
-            "emoji": "🌍", "color": "#8b6f47", "status": "context",
-            "detail": "Magnitude ≥ 3.0 dans un rayon de 500 km",
-        })
-
-    # ── 6. GDACS ──────────────────────────────────────────────────
-    if (_RAW_DIR / f"gdacs_{hospital_key}.csv").exists():
-        sources.append({
-            "label": "Catastrophes GDACS (JRC/OCHA)",
-            "emoji": "🚨", "color": "#e67e22", "status": "context",
-            "detail": "Inondations, cyclones, séismes, sécheresses, feux",
-        })
-
-    # ── 7. GDELT (signal médiatique) ──────────────────────────────
-    if (_RAW_DIR / f"gdelt_{hospital_key}.csv").exists():
-        sources.append({
-            "label": "Signal médiatique GDELT 2.0",
-            "emoji": "📰", "color": "#e84393", "status": "context",
-            "detail": "Volume / tonalité : énergie, météo, santé, désastres",
-        })
-
-    # ── 8. NOAA Storm Events (USA) ────────────────────────────────
-    if hospital_key == "phoenix_usa" and (
-        _RAW_DIR / "noaa_storm" / "storm_events_details_2022.csv"
-    ).exists():
-        sources.append({
-            "label": "NOAA Storm Events (USA)",
-            "emoji": "🌩️", "color": "#34495e", "status": "context",
-            "detail": "Tempêtes, tornades, vagues de chaleur (Arizona)",
-        })
-
-    return sources
 
 
 # Préfixes des signaux externes : centralisés dans src/utils/config.py
@@ -718,79 +244,6 @@ def detect_hospital_data_sources(hospital_key: str, hospital_info: dict) -> list
 # exclues du modèle (cf. #3), mais on conserve la neutralisation ci-dessous
 # par sécurité (belt-and-suspenders) pour les colonnes encore présentes dans
 # les profils clonés.
-
-
-def _neutralize_external_signals(df: pd.DataFrame, hospital_key: str) -> pd.DataFrame:
-    """Pour un hôpital ≠ lacor_uganda, met à 0 toutes les colonnes dérivées
-    de signaux externes site-spécifiques (médias GDELT, catastrophes GDACS,
-    sismique USGS, qualité de l'air, tempêtes NOAA). Ces signaux n'ont de
-    sens que pour le site dont ils proviennent.
-
-    Sans ce nettoyage, l'inférence peut utiliser des signaux non disponibles
-    (ou provenant d'un autre site), ce qui dégrade la robustesse.
-    """
-    if hospital_key == "lacor_uganda":
-        return df
-    df = df.copy()
-    cols_to_zero = [
-        c for c in df.columns
-        if any(c.startswith(p) for p in EXTERNAL_SIGNAL_PREFIXES)
-    ]
-    if cols_to_zero:
-        df.loc[:, cols_to_zero] = 0
-    return df
-
-
-@st.cache_data
-def load_hospital_data(hospital_key: str, hospital_info: dict) -> pd.DataFrame:
-    """Charge les données de l'hôpital sélectionné.
-
-    Sources supportées :
-      - lacor_uganda : relevés terrain horaires 2022
-      - *_nhs        : données NHS ERIC désagrégées en horaire
-      - nyc_*        : données NYC LL84 désagrégées en horaire
-      - africa_grid  : profil estimé à partir d'un profil de référence
-    """
-    if hospital_info.get("data_source") == "eric":
-        eric_code = hospital_info["eric_code"]
-        eric_df = load_eric_features(eric_code, hospital_info)
-        if eric_df is not None:
-            return _neutralize_external_signals(eric_df, hospital_key)
-        st.error(
-            f"**Données ERIC introuvables** pour `{eric_code}`. "
-            f"Vérifiez `data/raw/eric/eric_{eric_code}_hourly.csv`."
-        )
-        st.stop()
-
-    if hospital_info.get("data_source") == "nyc_ll84":
-        nyc_code = hospital_info["nyc_code"]
-        nyc_df = load_nyc_features(nyc_code, hospital_info)
-        if nyc_df is not None:
-            return _neutralize_external_signals(nyc_df, hospital_key)
-        st.error(
-            f"**Données NYC LL84 introuvables** pour `{nyc_code}`. "
-            f"Vérifiez `data/raw/nyc_ll84/{nyc_code}_hourly.csv`."
-        )
-        st.stop()
-
-    if hospital_info.get("data_source") == "africa_grid":
-        africa_df = load_africa_grid_features(hospital_key, hospital_info)
-        if africa_df is not None:
-            return africa_df
-        st.error(
-            f"**Profil africain introuvable** pour `{hospital_key}`. "
-            "Vérifiez que `data/features/features_dataset.csv` existe."
-        )
-        st.stop()
-
-    if hospital_key == "lacor_uganda":
-        return load_lacor_features(_features_file_mtime())
-
-    st.error(
-        f"Hôpital `{hospital_key}` non supporté : aucune source de "
-        "consommation réelle disponible."
-    )
-    st.stop()
 
 
 def get_feature_columns(df: pd.DataFrame) -> list[str]:
@@ -865,27 +318,6 @@ def get_top_factors(model, feature_cols: list[str], values: pd.Series, top_n: in
             "value": values[feat] if feat in values.index else 0,
         })
     return factors
-
-
-@st.cache_data
-def load_global_shap_importance() -> pd.DataFrame | None:
-    """Charge l'importance SHAP moyenne par feature (entraînement)."""
-    p = MODELS_DIR / "shap_feature_importance.csv"
-    if not p.exists():
-        return None
-    try:
-        df = pd.read_csv(p)
-        if "feature" not in df.columns:
-            df.columns = ["feature", "mean_abs_shap"]
-        else:
-            value_col = [c for c in df.columns if c != "feature"][0]
-            df = df.rename(columns={value_col: "mean_abs_shap"})
-        df = df.sort_values("mean_abs_shap", ascending=False).reset_index(drop=True)
-        df["category"] = df["feature"].apply(get_feature_category)
-        df["label"] = df["feature"].apply(feature_label)
-        return df
-    except Exception:
-        return None
 
 
 def show_top_factors_panel(top_n: int = 12) -> None:
@@ -985,25 +417,6 @@ def show_data_sources_panel() -> None:
                 f"</div>",
                 unsafe_allow_html=True,
             )
-
-
-@st.cache_data
-def load_electricitymaps_snapshot(hospital_key: str) -> pd.DataFrame | None:
-    """Charge le CSV Electricity Maps d'un hôpital (si disponible)."""
-    path = ROOT / "data" / "raw" / f"electricitymaps_{hospital_key}.csv"
-    if not path.exists():
-        return None
-    try:
-        em = pd.read_csv(path)
-    except Exception:
-        return None
-    if em.empty or "datetime" not in em.columns:
-        return None
-    em["datetime"] = pd.to_datetime(em["datetime"], errors="coerce")
-    em = em.dropna(subset=["datetime"]).sort_values("datetime")
-    if em.empty:
-        return None
-    return em
 
 
 def compute_shap_local(explainer, row_df: pd.DataFrame, feature_cols: list[str]):
