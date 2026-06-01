@@ -1,0 +1,27 @@
+{
+  "external_site": "Maricopa County / Phoenix (Arizona, USA)",
+  "external_source": "EAGLE-I (ORNL/DOE, figshare 24237376, CC BY 4.0), 2022, agr\u00e9g\u00e9 horaire",
+  "feature_set": "exog\u00e8ne (m\u00e9t\u00e9o + temporel)",
+  "n_exogenous_features": 29,
+  "maricopa_outage_threshold_customers": 1268.2,
+  "maricopa_outage_rate": 0.1,
+  "maricopa_n_hours": 8760,
+  "external_metrics": {
+    "accuracy": 0.8966,
+    "precision": 0.1429,
+    "recall": 0.0068,
+    "f1": 0.0131,
+    "roc_auc": 0.5173,
+    "brier": 0.1258
+  },
+  "external_climatology_roc_auc": 0.7137,
+  "lacor_internal_exogenous_ref": {
+    "accuracy": 0.8895,
+    "precision": 0.1351,
+    "recall": 0.023,
+    "f1": 0.0394,
+    "roc_auc": 0.6659,
+    "brier": 0.1125
+  },
+  "interpretation": "ROC-AUC nettement > 0.5 \u21d2 le signal m\u00e9t\u00e9o appris sur Lacor classe mieux que le hasard les heures \u00e0 coupure d'un site R\u00c9EL ind\u00e9pendant. \u2248 0.5 \u21d2 la relation m\u00e9t\u00e9o\u2192coupure ne transf\u00e8re pas (sp\u00e9cifique au site). EAGLE-I = comptes de clients coup\u00e9s au comt\u00e9 (cible reformul\u00e9e), pas une coupure d'h\u00f4pital ; horodatages align\u00e9s \u00e0 l'heure (l\u00e9ger flou de fuseau possible)."
+}

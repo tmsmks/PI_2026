@@ -160,8 +160,37 @@ Comme on ne dispose que d'**un site × une année**, la robustesse temporelle es
 Lecture : la discrimination (ROC AUC) reste élevée toute l'année ; le F1 progresse
 avec l'historique disponible (≈0.71 aux premiers mois → ≈0.81 en fin d'année).
 ⚠️ Ceci mesure la stabilité **dans le temps sur Lacor** — pas la généralisation à
-**d'autres sites** (qui exigerait des coupures réelles multi-sites). Détail par
-mois : `models/backtest_by_month.csv` + `models/backtest_summary.json`.
+**d'autres sites**. Détail par mois : `models/backtest_by_month.csv`.
+
+### Validation EXTERNE sur un site réel indépendant (généralisation spatiale)
+
+Pour tester la généralisation à un **autre site réel**, on confronte le modèle au
+comté de **Maricopa / Phoenix (Arizona)** via les coupures **réelles EAGLE-I**
+(ORNL/DOE, [figshare 24237376](https://doi.org/10.6084/m9.figshare.24237376),
+CC BY 4.0, 2022, agrégées à l'heure) + la météo Open-Meteo de Phoenix.
+Script : [`src/models/external_validation.py`](src/models/external_validation.py).
+
+EAGLE-I ne fournit pas la consommation hospitalière → on compare un modèle
+**exogène** (météo + temporel seul, sans charge ni auto-régression) :
+
+| | ROC-AUC | Lecture |
+|---|---|---|
+| Modèle météo-seul, **interne Lacor** (test oct–déc) | **0.67** | bien plus faible que le modèle complet (0.98) → la puissance vient surtout de l'**auto-régression / consommation**, pas de la météo |
+| **Transfert Lacor → Maricopa** (site réel) | **0.52** | ≈ hasard → le signal météo **ne se généralise pas** à un autre site |
+| Climatologie locale mois×heure (Maricopa) | **0.71** | une simple moyenne locale **bat** le modèle Lacor transféré |
+
+**Conclusion empirique** : la relation météo→coupure est **spécifique au site**.
+Le modèle entraîné sur Lacor **ne prédit pas** les coupures d'un site indépendant
+mieux que le hasard ; la promesse multi-hôpitaux reste donc une **extrapolation
+illustrative** (profil cloné + score heuristique), pas une capacité validée.
+Détail : `models/external_validation_summary.json`.
+
+> **Sur la disponibilité de vraies données.** Une recherche (Zenodo, Google Dataset
+> Search, ORNL) montre qu'il n'existe **pas** de jeu public « hôpital × coupure
+> binaire horaire » comparable à Lacor (le seul résultat Zenodo pertinent est Lacor
+> lui-même). Les sources réelles exploitables sont au niveau **comté/région** :
+> EAGLE-I (US, 2014-2023, historique), ODIN & Maryland (ORNL, temps réel). C'est
+> précisément cette rareté qui explique le recours au clonage dans ce projet.
 
 Les classements de features sont disponibles ici :
 - `models/feature_importance.csv` — importance MDI du modèle gagnant
