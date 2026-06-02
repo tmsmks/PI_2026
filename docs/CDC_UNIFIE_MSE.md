@@ -12,7 +12,7 @@ Ce projet vise a concevoir une solution **data/IA** capable de predire les coupu
 
 Le systeme s'appuie sur :
 - des donnees reelles (Lacor Hospital),
-- des donnees de benchmark (Phoenix, NHS ERIC),
+- des profils comparables (NHS ERIC, NYC LL84, sites africa_grid clones),
 - des donnees meteo (Open-Meteo),
 - des donnees de contexte reseau/pays (OMS, Eskom).
 
@@ -58,14 +58,14 @@ Creer un **systeme de stockage energetique** adapte a des facteurs multi-critere
 
 - Ingestion multi-sources:
   - Lacor (donnees de charge et disponibilite reseau),
-  - Phoenix (benchmark),
+  - validation externe historique Maricopa/EAGLE-I (trace documentaire, hors depot),
   - OMS (fiabilite electrique par pays),
   - Open-Meteo (variables meteorologiques),
   - Eskom/EskomSePush (contexte de stabilite reseau),
   - NHS ERIC (profils hospitaliers).
 - Nettoyage et fusion des donnees temporelles.
 - Feature engineering (variables temporelles, consommation, meteo, contexte).
-- Entrainement et comparaison de modeles (RF / XGB / LGBM, LSTM en bonus).
+- Entrainement nowcast (RF / XGB / LGBM) + horizons 1/3/6 h (memes features).
 - Calibration des probabilites.
 - Generation d'explications locales/globales (SHAP).
 - Exposition des resultats dans l'application Streamlit.

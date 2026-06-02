@@ -9,14 +9,20 @@ Variables créées :
   - month_sin, month_cos                  (encodage cyclique)
   - is_public_holiday                     (jours fériés ougandais)
 
-  ── Consommation (rolling) ──
+  ── Consommation (rolling, kW absolus — EXCLUS du modèle, cf. COLS_TO_DROP) ──
   - load_rolling_6h                       (moyenne glissante 6h)
   - load_rolling_24h                      (moyenne glissante 24h)
   - load_std_24h                          (écart-type glissant 24h)
   - load_diff_1h                          (variation heure par heure)
   - load_diff_24h                         (variation jour par jour)
+
+  ── Consommation (SANS DIMENSION — servies au modèle, transférables) ──
   - load_pct_change_1h                    (variation relative %)
-  - peak_ratio                            (ratio charge / moyenne 24h)
+  - peak_ratio                            (charge / moyenne 24h)
+  - load_zscore_24h                       (écart à la baseline en σ)
+  - load_cv_24h                           (coefficient de variation 24h)
+  - load_ratio_6h_24h                     (tendance court/long terme)
+  - load_diff_1h_rel / load_diff_24h_rel  (variations / baseline 24h)
 
   ── Sources d'énergie ──
   - solar_ratio                           (part du solaire dans la charge)
@@ -51,7 +57,6 @@ Variables créées :
   - pressure_change_3h                    (variation pression sur 3h)
 
 Features retirées (importance 0, constantes sur la série mono-hôpital) :
-  - storm_risk
 """
 
 import logging
@@ -97,6 +102,41 @@ def add_load_features(df: pd.DataFrame) -> pd.DataFrame:
 
     df["peak_ratio"] = (df[col] / df["load_rolling_24h"]).fillna(1).replace([np.inf, -np.inf], 1)
 
+    # ── Versions SANS DIMENSION (transférables inter-sites) ──
+    # Les features ci-dessus en kW absolus collent à l'échelle du site
+    # d'entraînement (Lacor ~133 kW) et ne transfèrent pas à un hôpital de
+    # plusieurs MW. On dérive ici des équivalents normalisés par le profil
+    # PROPRE de chaque site, donc réutilisables sur n'importe quel hôpital
+    # qui fournit son flux de consommation. Ce sont ces colonnes qui sont
+    # servies au modèle (les kW bruts sont exclus via COLS_TO_DROP).
+    safe_roll24 = df["load_rolling_24h"].replace(0, np.nan)
+    safe_std24 = df["load_std_24h"].replace(0, np.nan)
+
+    # Écart à la baseline 24 h en nombre d'écarts-types (pic/creux anormal).
+    df["load_zscore_24h"] = (
+        ((df[col] - df["load_rolling_24h"]) / safe_std24)
+        .replace([np.inf, -np.inf], 0).fillna(0).clip(-10, 10)
+    )
+    # Coefficient de variation : volatilité de la charge, indépendante du niveau.
+    df["load_cv_24h"] = (
+        (df["load_std_24h"] / safe_roll24)
+        .replace([np.inf, -np.inf], 0).fillna(0).clip(0, 10)
+    )
+    # Tendance court terme vs long terme (1 = stable, >1 = montée récente).
+    df["load_ratio_6h_24h"] = (
+        (df["load_rolling_6h"] / safe_roll24)
+        .replace([np.inf, -np.inf], 1).fillna(1).clip(0, 10)
+    )
+    # Variations rapportées à la baseline du site (sans dimension).
+    df["load_diff_1h_rel"] = (
+        (df["load_diff_1h"] / safe_roll24)
+        .replace([np.inf, -np.inf], 0).fillna(0).clip(-10, 10)
+    )
+    df["load_diff_24h_rel"] = (
+        (df["load_diff_24h"] / safe_roll24)
+        .replace([np.inf, -np.inf], 0).fillna(0).clip(-10, 10)
+    )
+
     return df
 
 
@@ -112,6 +152,11 @@ def add_energy_source_features(df: pd.DataFrame) -> pd.DataFrame:
 
     if "base_load_kw" in df.columns:
         df["base_load_ratio"] = (df["base_load_kw"] / total).fillna(0).clip(0, 1)
+
+    # Part de la stérilisation dans la charge (sans dimension, transférable) —
+    # remplace `sterilization_kw` absolu, exclu du modèle via COLS_TO_DROP.
+    if "sterilization_kw" in df.columns:
+        df["sterilization_ratio"] = (df["sterilization_kw"] / total).fillna(0).clip(0, 1)
 
     if "grid_availability_ratio" in df.columns:
         df["grid_availability_rolling_6h"] = (
@@ -204,8 +249,6 @@ def add_meteo_features(df: pd.DataFrame) -> pd.DataFrame:
     df["wind_precipitation_interaction"] = df["wind_speed_10m"] * df["precipitation"]
     df["solar_available"] = (df["shortwave_radiation"] > 50).astype(int)
     df["heat_stress"] = (df["temperature_2m"] > 30).astype(int)
-    df["storm_risk"] = ((df["wind_speed_10m"] > 40) | (df["precipitation"] > 10)).astype(int)
-
     return df
 
 
@@ -269,167 +312,11 @@ def add_advanced_meteo_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def add_gdelt_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Features dérivées du signal GDELT (volumes et tonalité presse).
-
-    - Moyenne glissante 7 jours sur chaque volume (lissage bruit quotidien).
-    - Anomalie vs moyenne 30 jours (pic médiatique = signal de stress).
-    - Ratio tonalité négative × volume (intensité perçue).
-    """
-    themes = [c.replace("gdelt_", "").replace("_vol", "")
-              for c in df.columns if c.startswith("gdelt_") and c.endswith("_vol")]
-
-    if not themes:
-        logger.info("Pas de colonnes GDELT — features GDELT ignorées.")
-        return df
-
-    win_7d = 24 * 7
-    win_30d = 24 * 30
-    for theme in themes:
-        vol = f"gdelt_{theme}_vol"
-        tone = f"gdelt_{theme}_tone"
-        df[f"gdelt_{theme}_vol_7d"] = (
-            df.groupby("hospital", sort=False)[vol]
-            .transform(lambda s: s.rolling(win_7d, min_periods=1).mean())
-        )
-        base_30d = (
-            df.groupby("hospital", sort=False)[vol]
-            .transform(lambda s: s.rolling(win_30d, min_periods=1).mean())
-        )
-        df[f"gdelt_{theme}_anomaly"] = (
-            (df[vol] - base_30d) / base_30d.replace(0, np.nan)
-        ).fillna(0).clip(-5, 5)
-        if tone in df.columns:
-            df[f"gdelt_{theme}_stress"] = (
-                df[vol] * np.maximum(-df[tone], 0)
-            ).clip(lower=0)
-
-    logger.info("Features GDELT ajoutées (%d thèmes).", len(themes))
-    return df
-
-
-def add_noaa_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Features dérivées des événements NOAA Storm Events (USA)."""
-    storm_cols = [c for c in df.columns if c.startswith("storm_")]
-    if not storm_cols:
-        logger.info("Pas de colonnes NOAA — features NOAA ignorées.")
-        return df
-
-    if "storm_active" in df.columns:
-        by_hospital = df.groupby("hospital", sort=False)["storm_active"]
-        df["storm_active_6h"] = by_hospital.transform(lambda s: s.rolling(6, min_periods=1).max())
-        df["storm_active_24h"] = by_hospital.transform(lambda s: s.rolling(24, min_periods=1).max())
-    if "storm_event_count" in df.columns:
-        df["storm_count_24h"] = (
-            df.groupby("hospital", sort=False)["storm_event_count"]
-            .transform(lambda s: s.rolling(24, min_periods=1).sum())
-        )
-    logger.info("Features NOAA ajoutées.")
-    return df
-
-
-def add_air_quality_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Features dérivées de la qualité de l'air.
-
-    Hypothèses physiques :
-        - Une pollution forte ⇒ ventilation hospitalière sollicitée.
-        - Un pic de poussière ⇒ usure des filtres + chute de production PV.
-        - Un AQI > 50 sur 24 h ⇒ afflux respiratoire ⇒ surconsommation
-          (oxygène, nébulisateurs, climatisation des chambres d'isolement).
-    """
-    air_cols = [c for c in df.columns if c.startswith("air_")]
-    if not air_cols:
-        logger.info("Pas de colonnes air_quality — features ignorées.")
-        return df
-
-    # Moyennes glissantes 6 h et 24 h pour PM2.5 et dust
-    for col in ("air_pm2_5", "air_pm10", "air_dust", "air_european_aqi"):
-        if col in df.columns:
-            by_hospital = df.groupby("hospital", sort=False)[col]
-            df[f"{col}_6h"] = by_hospital.transform(lambda s: s.rolling(6, min_periods=1).mean())
-            df[f"{col}_24h"] = by_hospital.transform(lambda s: s.rolling(24, min_periods=1).mean())
-
-    # Indicateur "pic de pollution" (AQI > 50 = mauvais selon échelle EU)
-    if "air_european_aqi" in df.columns:
-        df["air_pollution_high"] = (df["air_european_aqi"] > 50).astype(int)
-
-    # Indicateur "tempête de poussière" (dust > 100 µg/m³ = sévère)
-    if "air_dust" in df.columns:
-        df["air_dust_storm"] = (df["air_dust"] > 100).astype(int)
-
-    # Stress combiné chaleur + pollution (vague de chaleur polluée
-    # ⇒ surcharge climatisation + admissions cardio-respiratoires)
-    if "heat_stress" in df.columns and "air_pollution_high" in df.columns:
-        df["air_heat_pollution_stress"] = (
-            df["heat_stress"] * df["air_pollution_high"]
-        ).astype(int)
-
-    logger.info("Features qualité de l'air ajoutées.")
-    return df
-
-
-def add_earthquake_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Features dérivées du stress sismique USGS."""
-    eq_cols = [c for c in df.columns if c.startswith("eq_")]
-    if not eq_cols:
-        logger.info("Pas de colonnes USGS — features sismiques ignorées.")
-        return df
-
-    if "eq_stress" in df.columns:
-        # Cumul du stress sur 24 h et 7 jours (réplique post-séisme)
-        by_hospital = df.groupby("hospital", sort=False)["eq_stress"]
-        df["eq_stress_24h"] = by_hospital.transform(lambda s: s.rolling(24, min_periods=1).sum())
-        df["eq_stress_7d"] = by_hospital.transform(lambda s: s.rolling(168, min_periods=1).sum())
-
-    if "eq_max_mag_24h" in df.columns:
-        df["eq_major_event"] = (df["eq_max_mag_24h"] >= 5.0).astype(int)
-
-    logger.info("Features USGS ajoutées.")
-    return df
-
-
-def add_gdacs_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Features dérivées des alertes GDACS (catastrophes naturelles).
-
-    Ces signaux capturent un stress *indirect* sur la consommation :
-        - Catastrophe en cours ⇒ afflux de patients ⇒ équipements
-          médicaux et stérilisation à plein régime.
-        - Niveau d'alerte élevé ⇒ probabilité de coupure réseau accrue.
-        - Persistance d'un événement ⇒ effet cumulatif sur la
-          consommation hospitalière.
-    """
-    gdacs_cols = [c for c in df.columns if c.startswith("gdacs_")]
-    if not gdacs_cols:
-        logger.info("Pas de colonnes GDACS — features ignorées.")
-        return df
-
-    if "gdacs_alert_score" in df.columns:
-        by_hospital = df.groupby("hospital", sort=False)["gdacs_alert_score"]
-        df["gdacs_alert_24h"] = by_hospital.transform(lambda s: s.rolling(24, min_periods=1).max())
-        df["gdacs_alert_7d_max"] = by_hospital.transform(lambda s: s.rolling(168, min_periods=1).max())
-
-    if "gdacs_active_count" in df.columns:
-        df["gdacs_disaster_active"] = (df["gdacs_active_count"] > 0).astype(int)
-
-    # Catastrophe majeure (Orange ou Red ⇒ score ≥ 2)
-    if "gdacs_alert_score" in df.columns:
-        df["gdacs_major_disaster"] = (df["gdacs_alert_score"] >= 2.0).astype(int)
-
-    # Combinaison stress climatique + catastrophe : double effet
-    if "storm_risk" in df.columns and "gdacs_disaster_active" in df.columns:
-        df["gdacs_storm_combo"] = (
-            df["storm_risk"] * df["gdacs_disaster_active"]
-        ).astype(int)
-
-    logger.info("Features GDACS ajoutées.")
-    return df
-
-
 # ── API publique pour l'app Streamlit ──────────────────────────────
 # Réutilise les blocs de FE multi-hôpitaux ci-dessus pour qu'un consommateur
 # mono-hôpital (Streamlit) puisse appliquer EXACTEMENT le même calcul
 # que le pipeline d'entraînement. Élimine la duplication historique
-# `_apply_feature_engineering` dans app.py.
+# `app_data._apply_feature_engineering` délègue ici.
 
 
 def apply_feature_engineering_single(
@@ -530,21 +417,6 @@ def run() -> None:
     step = perf_counter()
     df = add_outage_history_features(df)
     logger.info("Timing add_outage_history_features: %.2fs", perf_counter() - step)
-    step = perf_counter()
-    df = add_gdelt_features(df)
-    logger.info("Timing add_gdelt_features: %.2fs", perf_counter() - step)
-    step = perf_counter()
-    df = add_noaa_features(df)
-    logger.info("Timing add_noaa_features: %.2fs", perf_counter() - step)
-    step = perf_counter()
-    df = add_air_quality_features(df)
-    logger.info("Timing add_air_quality_features: %.2fs", perf_counter() - step)
-    step = perf_counter()
-    df = add_earthquake_features(df)
-    logger.info("Timing add_earthquake_features: %.2fs", perf_counter() - step)
-    step = perf_counter()
-    df = add_gdacs_features(df)
-    logger.info("Timing add_gdacs_features: %.2fs", perf_counter() - step)
 
     # Remplacer les NaN restants
     numeric_cols = df.select_dtypes(include=[np.number]).columns

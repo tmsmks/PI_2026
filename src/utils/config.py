@@ -31,100 +31,10 @@ METEO_HOURLY_VARS = [
 
 # ── Coordonnées des hôpitaux ────────────────────────────────────────
 # Dérivé automatiquement du catalogue UI dans `src/utils/hospitals.py`.
-# Utilisé par les ingestions géolocalisées (Open-Meteo, Forecast, USGS,
-# GDACS, GDELT, NOAA, Electricity Maps).
+# Utilisé par les ingestions géolocalisées (Open-Meteo, Forecast, Electricity Maps).
 from src.utils.hospitals import HOSPITAL_DISPLAY, build_hospital_locations  # noqa: E402
 
 HOSPITAL_LOCATIONS = build_hospital_locations()
-
-# ── GDELT DOC 2.0 (signal médiatique événementiel) ──────────────────
-# Base d'articles mondiale, sans clé, utile là où on n'a pas d'API réseau.
-# Documentation : https://blog.gdeltproject.org/gdelt-doc-2-0-api-debuts/
-GDELT_DOC_BASE = "https://api.gdeltproject.org/api/v2/doc/doc"
-# Requêtes thématiques par hôpital. Quatre thèmes capturent des dimensions
-# distinctes susceptibles d'affecter la stabilité électrique et/ou la
-# consommation d'un hôpital :
-#   - power    : coupures, délestage, problèmes réseau direct
-#   - weather  : événements météo extrêmes
-#   - health   : crises sanitaires, surcharge urgences
-#   - disaster : épidémies, catastrophes, déplacés (signal indirect fort
-#                pour Lacor : afflux patients = pics consommation)
-GDELT_QUERIES = {
-    "lacor_uganda": {
-        "power": '(uganda OR gulu) (blackout OR "power outage" OR "power cut" OR UMEME OR "load shedding")',
-        "weather": '(uganda OR gulu) (storm OR flood OR "heavy rain" OR lightning OR thunderstorm)',
-        "health": '(uganda OR gulu) (hospital OR clinic) (emergency OR crisis OR disruption)',
-        "disaster": '(uganda OR gulu) (epidemic OR outbreak OR ebola OR malaria OR cholera OR refugee OR displaced OR landslide)',
-    },
-    "phoenix_usa": {
-        "power": '(arizona OR phoenix) (blackout OR "power outage" OR "grid failure" OR APS)',
-        "weather": '(arizona OR phoenix) (monsoon OR flood OR haboob OR "dust storm" OR wildfire OR heatwave)',
-        "health": '(arizona OR phoenix) (hospital OR ER) (emergency OR overloaded OR disruption)',
-        "disaster": '(arizona OR phoenix) (wildfire OR evacuation OR "extreme heat" OR drought OR outbreak OR pandemic)',
-    },
-}
-
-# ── Open-Meteo Air Quality (pollution & poussière) ──────────────────
-# Sans clé, granularité horaire, couverture mondiale.
-# Variables critiques pour l'hôpital : PM2.5, PM10, ozone, dust
-# (surcharge climatisation, filtration, afflux respiratoires).
-AIR_QUALITY_BASE = "https://air-quality-api.open-meteo.com/v1/air-quality"
-AIR_QUALITY_VARS = [
-    "pm10",
-    "pm2_5",
-    "carbon_monoxide",
-    "nitrogen_dioxide",
-    "sulphur_dioxide",
-    "ozone",
-    "dust",
-    "uv_index",
-    "european_aqi",
-]
-
-# ── USGS Earthquake API (séismes) ───────────────────────────────────
-# API publique gratuite, pas de clé. Renvoie tous les séismes dans un
-# rayon donné autour des coordonnées fournies, avec magnitude et heure.
-USGS_EARTHQUAKE_BASE = "https://earthquake.usgs.gov/fdsnws/event/1/query"
-USGS_SEARCH_RADIUS_KM = 500   # rayon autour de l'hôpital
-USGS_MIN_MAGNITUDE = 3.0      # seuil minimal (sous ce seuil = bruit)
-
-# ── GDACS (Global Disaster Alert and Coordination System) ──────────
-# API publique sans clé, géré conjointement par l'UE (JRC) et l'OCHA.
-# Recense les catastrophes naturelles majeures avec niveau d'alerte
-# (Vert/Orange/Rouge) et fenêtres temporelles précises.
-# Couverture mondiale : inondations, séismes, cyclones, sécheresses,
-# feux de forêt, éruptions volcaniques.
-# Documentation : https://www.gdacs.org/Knowledge/archivedata.aspx
-GDACS_BASE = "https://www.gdacs.org/gdacsapi/api/events/geteventlist/SEARCH"
-# Mapping niveau d'alerte → score numérique pour pondération
-GDACS_ALERT_SCORE = {"Green": 1.0, "Orange": 2.0, "Red": 3.0}
-# Mapping type d'événement GDACS → catégorie interne
-GDACS_EVENT_TYPES = {
-    "FL": "flood",
-    "TC": "cyclone",
-    "EQ": "earthquake",
-    "VO": "volcano",
-    "DR": "drought",
-    "WF": "wildfire",
-    "TS": "tsunami",
-}
-# Filtres par hôpital : code pays ISO3 (les hôpitaux non listés sont ignorés)
-GDACS_FILTERS = {
-    "lacor_uganda":         "UGA",
-    "phoenix_usa":          "USA",
-    "kenyatta_kenya":       "KEN",
-    "tikur_ethiopia":       "ETH",
-    "groote_schuur_sa":     "ZAF",
-    "dhaka_bangladesh":     "BGD",
-    "fann_senegal":         "SEN",
-    "parirenyatwa_zimbabwe":"ZWE",
-    "muhimbili_tanzania":   "TZA",
-    "luth_nigeria":         "NGA",
-    "korle_bu_ghana":       "GHA",
-    "ibn_sina_morocco":     "MAR",
-    "kasr_alainy_egypt":    "EGY",
-    "chuk_rwanda":          "RWA",
-}
 
 # ── Open-Meteo Forecast (prédictions futures pour l'app Streamlit) ──
 METEO_FORECAST_BASE = "https://api.open-meteo.com/v1/forecast"
@@ -161,13 +71,11 @@ ELECTRICITYMAPS_TOKEN_ENV = "ELECTRICITY_MAPS_TOKEN"
 # Quand un hôpital est dans un pays mono-zone on prend le code ISO2 ; pour
 # les pays découpés en sous-réseaux (USA, Canada, Australie…) on prend le
 # code du Balancing Authority / ISO le plus proche géographiquement.
-#   Phoenix       → US-SW-AZPS  (Arizona Public Service, balancing area)
 #   NYC           → US-NY-NYIS  (NY-ISO)
 #   UK NHS        → GB           (réseau National Grid unique pour GB)
 #   Lacor         → UG, etc.
 HOSPITAL_ELECTRICITY_ZONES = {
     "lacor_uganda":            "UG",
-    "phoenix_usa":             "US-SW-AZPS",
     "kenyatta_kenya":          "KE",
     "tikur_ethiopia":          "ET",
     "groote_schuur_sa":        "ZA",
@@ -181,30 +89,41 @@ HOSPITAL_ELECTRICITY_ZONES = {
     "kasr_alainy_egypt":       "EG",
     "chuk_rwanda":             "RW",
     "st_thomas_nhs":           "GB",
+    "guys_nhs":                "GB",
     "addenbrookes_nhs":        "GB",
     "manchester_nhs":          "GB",
     "kings_college_nhs":       "GB",
     "john_radcliffe_nhs":      "GB",
+    "leeds_general_nhs":       "GB",
+    "birmingham_heartlands_nhs": "GB",
+    "newcastle_rvi_nhs":       "GB",
+    "royal_devon_nhs":         "GB",
+    "nyc_bellevue":            "US-NY-NYIS",
+    "nyc_nyu_tisch":           "US-NY-NYIS",
+    "nyc_nyp_brooklyn":        "US-NY-NYIS",
+    "nyc_elmhurst":            "US-NY-NYIS",
+    "nyc_lincoln":             "US-NY-NYIS",
 }
 
-# ── NOAA Storm Events (USA uniquement) ──────────────────────────────
-# Base de données publique d'événements météorologiques extrêmes.
-# Documentation : https://www.ncdc.noaa.gov/stormevents/
-NOAA_STORM_BASE = "https://www.ncei.noaa.gov/pub/data/swdi/stormevents/csvfiles/"
-NOAA_STORM_CACHE_DIR = RAW_DIR / "noaa_storm"
-# Mapping hôpital → filtre (état, comté) pour restreindre le jeu brut.
-# Seuls les sites US sont couverts ; les sites hors USA sont ignorés.
-NOAA_STORM_FILTERS = {
-    "phoenix_usa": {"state": "ARIZONA", "county": "MARICOPA"},
-}
-# Types d'événements jugés pertinents pour la stabilité électrique.
-NOAA_STORM_EVENT_GROUPS = {
-    "thunderstorm": ["Thunderstorm Wind", "Lightning", "Tornado", "Hail"],
-    "flood": ["Flood", "Flash Flood", "Heavy Rain"],
-    "wind": ["High Wind", "Strong Wind"],
-    "heat": ["Heat", "Excessive Heat"],
-    "winter": ["Winter Storm", "Ice Storm", "Blizzard", "Heavy Snow"],
-    "dust": ["Dust Storm", "Dust Devil"],
+# ── EskomSePush (délestage programmé Afrique du Sud) ────────────────
+# Cause DIRECTE des coupures en Afrique du Sud : le délestage (load-shedding)
+# d'Eskom et des municipalités est planifié et publié. EskomSePush expose ce
+# stade en temps réel + le calendrier à venir.
+#   Inscription / token gratuit (50 appels/jour) : https://eskomsepush.gumroad.com/l/api
+#   Doc API : https://documenter.getpostman.com/view/1296288/UzQuNk3E
+# Header requis : `token: <API_KEY>`.
+#
+# Honnêteté : ce signal ne concerne QUE les sites sud-africains. Il ne peut pas
+# être testé sur Lacor (Ouganda, réseau UMEME) faute de calendrier équivalent.
+# Il est donc exposé comme CONTEXTE temps réel dans l'app (pas une feature du
+# modèle entraîné sur Lacor).
+ESKOM_SEPUSH_BASE = "https://developer.sepush.co.za/business/2.0"
+ESKOM_SEPUSH_TOKEN_ENV = "ESKOM_SEPUSH_TOKEN"
+# Bloc de statut national pertinent par hôpital (Cape Town publie son propre
+# stade, souvent inférieur à celui d'Eskom). Les sites non listés ⇒ pas de
+# délestage programmé public exploité.
+ESKOM_SEPUSH_STATUS_BLOCK = {
+    "groote_schuur_sa": "capetown",
 }
 
 # ── Fichiers de données brutes ──────────────────────────────────────
@@ -222,33 +141,41 @@ COLS_TO_DROP = [
     "is_outage",
     # Colonnes avec fuite directe (connues uniquement pendant la coupure)
     "grid_availability_ratio",
+    # grid_available ≈ inverse exact de is_outage (grid_available=1 ⇒ 0 coupure
+    # sur 131 362 lignes ; is_outage=1 ⇒ grid_available=0 à 100 %). C'est la
+    # cible déguisée : fuite franche, à exclure comme grid_availability_ratio.
+    "grid_available",
     "generators_kw",
     "generator_active",
     "generator_ratio",
     "grid_availability_rolling_6h",
     "recent_outages_6h",
     "recent_outages_24h",
-    # Constantes sur la série mono-hôpital
+    # Legacy : plus calculée depuis juin 2026, peut subsister dans d'anciens CSV
     "storm_risk",
     # Colonnes brutes météo redondantes avec les features dérivées
     "cloud_cover",
     "visibility",
     "et0_fao_evapotranspiration",
+    # NOTE : la consommation en kW ABSOLUS (total_load_kw, solar_pv_kw,
+    # base_load_kw, sterilization_kw, load_rolling_*, load_std_24h,
+    # load_diff_*) est CONSERVÉE comme feature. Elle est le signal le plus
+    # prédictif sur Lacor ; le projet assume un modèle pilote MONO-SITE
+    # (Lacor), où l'échelle absolue est cohérente. Elle avait été retirée pour
+    # tenter une généralisation multi-sites — abandonnée faute de données
+    # réelles (conso + coupures subies) sur d'autres hôpitaux.
 ]
 
 # ── Signaux externes exclus du modèle (cf. #3 train-serve skew) ──────
-# Ces familles de features (médias GDELT, catastrophes GDACS, sismique USGS,
-# qualité de l'air, charge réseau Electricity Maps, tempêtes NOAA) sont :
-#   1. mises à 0 à l'inférence pour tout hôpital ≠ Lacor → décalage
-#      entraînement/service (train-serve skew) ;
-#   2. dominées par les volumes de presse GDELT, qui agissaient comme un
-#      proxy temporel spurieux (top importance sur 1 an / 1 hôpital).
-# On les exclut donc du jeu de features du modèle. Les colonnes restent
-# présentes dans `features_dataset` (inspection / réactivation éventuelle),
-# mais ne sont jamais fournies au modèle. Réutilisé par `train_baseline`
-# (prepare_data) et `app.py` (get_feature_columns).
+# La charge réseau Electricity Maps (`em_*`) est INGÉRÉE et affichée comme
+# contexte (et sert la prévision temps réel via l'API live), mais reste
+# EXCLUE des features du modèle : elle n'est pas disponible à l'échelle du
+# site et créerait un décalage entraînement/service. Les autres signaux
+# externes historiques (GDELT, GDACS, USGS, qualité de l'air, NOAA) ont été
+# retirés du projet : testés, ils n'annonçaient pas les coupures et
+# dégradaient le modèle (cf. models/external_signal_experiment.json).
 EXTERNAL_SIGNAL_PREFIXES = (
-    "gdelt_", "gdacs_", "eq_", "air_", "em_", "noaa_", "storm_",
+    "em_",
 )
 
 

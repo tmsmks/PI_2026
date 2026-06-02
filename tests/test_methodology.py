@@ -31,6 +31,8 @@ from src.features.build_features import (
     add_outage_history_features,
     apply_feature_engineering_single,
 )
+from src.models.horizon_targets import build_horizon_target
+from src.nowcast_horizons import union_outage_probability
 
 
 def _toy_multi_hospital(n: int = 200, seed: int = 0) -> pd.DataFrame:
@@ -43,8 +45,8 @@ def _toy_multi_hospital(n: int = 200, seed: int = 0) -> pd.DataFrame:
             "hospital": h,
             "total_load_kw": rng.uniform(50, 150, n),
             "temperature_2m": rng.uniform(15, 35, n),
-            "gdelt_power_vol": rng.uniform(0, 10, n),   # signal externe
-            "air_pm2_5": rng.uniform(0, 50, n),          # signal externe
+            "em_total_load_mw": rng.uniform(0, 10, n),   # contexte réseau, exclu du modèle
+            "em_carbon_intensity": rng.uniform(0, 50, n),  # contexte réseau, exclu du modèle
             "is_outage": rng.binomial(1, 0.1, n),
         }))
     return pd.concat(frames, ignore_index=True)
@@ -53,17 +55,17 @@ def _toy_multi_hospital(n: int = 200, seed: int = 0) -> pd.DataFrame:
 # ── #3 : exclusion des signaux externes ──────────────────────────────
 
 def test_is_external_signal():
-    assert is_external_signal("gdelt_power_vol")
-    assert is_external_signal("air_pm2_5")
+    # Seul le contexte réseau Electricity Maps (em_*) reste exclu du modèle.
     assert is_external_signal("em_total_load_mw")
-    assert is_external_signal("storm_active")
+    assert is_external_signal("em_carbon_intensity")
     assert not is_external_signal("total_load_kw")
     assert not is_external_signal("hour")
+    assert not is_external_signal("temperature_2m")
 
 
 def test_drop_external_signal_columns():
-    cols = ["hour", "gdelt_x", "air_y", "total_load_kw", "eq_z", "storm_a", "em_b"]
-    assert drop_external_signal_columns(cols) == ["hour", "total_load_kw"]
+    cols = ["hour", "em_load", "total_load_kw", "em_carbon", "temperature_2m"]
+    assert drop_external_signal_columns(cols) == ["hour", "total_load_kw", "temperature_2m"]
 
 
 def test_prepare_data_excludes_external_and_target():
@@ -151,3 +153,19 @@ def test_calibrate_model_none_returns_raw_model():
     served, method = calibrate_model(model, X, y, method="none")
     assert method == "none"
     assert served is model  # aucun wrapper de calibration
+
+
+# ── Cibles horizons & agrégation proba ─────────────────────────────
+
+def test_build_horizon_target_flags_future_outage():
+    s = pd.Series([0, 0, 1, 0, 0, 0])
+    y1 = build_horizon_target(s, 1)
+    assert y1.iloc[1] == 1.0  # coupure à t+1
+    assert y1.iloc[0] == 0.0
+    y3 = build_horizon_target(s, 3)
+    assert y3.iloc[0] == 1.0  # coupure dans les 3 h suivantes
+
+
+def test_union_outage_probability():
+    assert union_outage_probability(np.array([0.5, 0.5])) == pytest.approx(0.75)
+    assert union_outage_probability(np.array([])) == 0.0

@@ -18,6 +18,8 @@ import streamlit as st
 from src.utils.config import (
     EXTERNAL_SIGNAL_PREFIXES,
     FEATURES_DIR,
+    HOSPITAL_ELECTRICITY_ZONES,
+    HOSPITAL_LOCATIONS,
     MODELS_DIR,
     ROOT_DIR,
 )
@@ -102,6 +104,89 @@ def load_model(_mtime: float = 0.0):
     st.stop()
 
 
+_HORIZON_DIR = MODELS_DIR / "nowcast_horizons"
+_HORIZON_HOURS = (1, 3, 6)
+
+
+def _horizon_models_mtime() -> float:
+    """mtime max des modèles horizons (invalide le cache au ré-entraînement)."""
+    mtimes = []
+    for h in _HORIZON_HOURS:
+        p = _HORIZON_DIR / f"horizon_{h}h" / "horizon_model.joblib"
+        if p.exists():
+            mtimes.append(p.stat().st_mtime)
+    summary = _HORIZON_DIR / "horizons_summary.json"
+    if summary.exists():
+        mtimes.append(summary.stat().st_mtime)
+    return max(mtimes) if mtimes else 0.0
+
+
+@st.cache_resource
+def load_horizon_models(_mtime: float = 0.0) -> dict[int, dict]:
+    """Modèles « coupure dans les H h » (mêmes features que le nowcast Lacor).
+
+    Retourne {1: bundle, 3: bundle, 6: bundle} ou {} si non entraînés
+    (`python -m src.models.train_horizons` ou `run_pipeline.py`)."""
+    out: dict[int, dict] = {}
+    for h in _HORIZON_HOURS:
+        p = _HORIZON_DIR / f"horizon_{h}h" / "horizon_model.joblib"
+        if not p.exists():
+            continue
+        try:
+            out[h] = joblib.load(p)
+        except Exception as e:  # noqa: BLE001
+            st.sidebar.warning(f"Modèle horizon {h}h illisible : {e}")
+    return out
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def load_realtime_forecast(
+    hospital_key: str,
+    feature_cols: tuple[str, ...],
+    model_mtime: float,
+    horizon_mtime: float,
+    _mtime: float = 0.0,
+) -> dict | None:
+    """Prévision TEMPS RÉEL (Electricity Maps + météo) via modèles Lacor.
+    Cache 15 min."""
+    from src.realtime_forecast import realtime_forecast
+
+    mdl = load_model(model_mtime)
+    horizon_models = load_horizon_models(horizon_mtime)
+
+    def _predict_proba(frame: pd.DataFrame) -> np.ndarray:
+        X = frame.reindex(columns=list(feature_cols)).fillna(0.0)
+        for col in feature_cols:
+            if col in X.columns:
+                X[col] = pd.to_numeric(X[col], errors="coerce").fillna(0.0)
+        return mdl.predict_proba(X)[:, 1].astype(float)
+
+    try:
+        return realtime_forecast(
+            hospital_key,
+            list(feature_cols),
+            _predict_proba,
+            horizon_models=horizon_models or None,
+        )
+    except Exception as e:  # noqa: BLE001
+        st.warning(f"Prévision temps réel indisponible : {e}")
+        return None
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def load_loadshedding(hospital_key: str, _bust: float = 0.0) -> dict | None:
+    """Contexte délestage EskomSePush (Afrique du Sud) pour un hôpital. Cache
+    15 min (quota API gratuit = 50 appels/j). Retourne le dict de
+    `loadshedding_for_hospital` ou None (site non sud-africain, token absent,
+    ou API indisponible). `_bust` permet de forcer un rafraîchissement."""
+    from src.loadshedding import loadshedding_for_hospital
+    try:
+        return loadshedding_for_hospital(hospital_key)
+    except Exception as e:  # noqa: BLE001
+        st.warning(f"Délestage EskomSePush indisponible : {e}")
+        return None
+
+
 @st.cache_resource
 def load_shap_explainer(_mtime: float = 0.0):
     explainer_path = MODELS_DIR / "shap_explainer.joblib"
@@ -141,6 +226,12 @@ def load_lacor_features(_mtime: float = 0.0):
         # 100 colonnes × 100k lignes), fallback CSV transparent.
         df = load_table(csv_path)
         df["datetime"] = pd.to_datetime(df["datetime"])
+        # Le dataset de features contient désormais plusieurs hôpitaux
+        # (expérience multi-sites archivée). L'app pilote est MONO-SITE Lacor :
+        # on ne garde que ses lignes, sinon les vues (charge, fenêtre 24 h) et
+        # les prédictions mélangent 16 hôpitaux (charges jusqu'à 8000 kW).
+        if "hospital" in df.columns and (df["hospital"] == "lacor_uganda").any():
+            df = df[df["hospital"] == "lacor_uganda"].reset_index(drop=True)
         return df
     except Exception as e:
         st.error(f"**Erreur au chargement des données Lacor** : {e}")
@@ -239,9 +330,7 @@ def load_eric_features(eric_code: str, hospital_info: dict) -> pd.DataFrame | No
 def load_africa_grid_features(hospital_key: str, hospital_info: dict) -> pd.DataFrame | None:
     """Charge un profil hospitalier africain en clonant Lacor puis en
     re-scaling sur `avg_load_kw`, en injectant la météo Open-Meteo locale
-    et le signal Electricity Maps (charge réseau temps réel) propres au
-    pays. Les autres signaux externes (GDELT/GDACS/USGS/AirQuality) sont
-    laissés au loader appelant qui les neutralise.
+    et le signal Electricity Maps (charge réseau) propres au pays.
 
     Justification : on n'a pas de relevé interne de consommation pour ces
     hôpitaux. Le profil temporel reste celui de Lacor (variations
@@ -455,75 +544,31 @@ def detect_hospital_data_sources(hospital_key: str, hospital_info: dict) -> list
             "detail": "Prévisions 7 jours pour mode anticipation",
         })
 
-    # ── 3. Qualité de l'air ───────────────────────────────────────
-    if (_RAW_DIR / f"air_quality_{hospital_key}.csv").exists():
-        sources.append({
-            "label": "Qualité de l'air Open-Meteo",
-            "emoji": "🌫️", "color": "#1abc9c", "status": "context",
-            "detail": "PM2.5, PM10, ozone, CO, NO₂, dust, UV",
-        })
-
-    # ── 4. Electricity Maps (réseau local) ───────────────────────
-    em_path = _RAW_DIR / f"electricitymaps_{hospital_key}.csv"
+    # ── 3. Electricity Maps (réseau local) ───────────────────────
+    em_path = electricitymaps_snapshot_path(hospital_key)
     if em_path.exists():
         sources.append({
             "label": "Electricity Maps (réseau local)",
             "emoji": "⚡", "color": "#f1c40f", "status": "context",
             "detail": "Zone locale, charge réseau, intensité carbone, mix",
         })
-    else:
+    elif hospital_key in HOSPITAL_LOCATIONS:
+        zone = HOSPITAL_ELECTRICITY_ZONES.get(hospital_key, "auto (lat/lon)")
         sources.append({
             "label": "Electricity Maps (réseau local)",
-            "emoji": "⚡", "color": "#e74c3c", "status": "missing",
-            "detail": "Fichier introuvable (lancer ingest_electricitymaps)",
-        })
-
-    # ── 5. Sismique USGS ──────────────────────────────────────────
-    if (_RAW_DIR / f"usgs_earthquake_{hospital_key}.csv").exists():
-        sources.append({
-            "label": "Séismes USGS",
-            "emoji": "🌍", "color": "#8b6f47", "status": "context",
-            "detail": "Magnitude ≥ 3.0 dans un rayon de 500 km",
-        })
-
-    # ── 6. GDACS ──────────────────────────────────────────────────
-    if (_RAW_DIR / f"gdacs_{hospital_key}.csv").exists():
-        sources.append({
-            "label": "Catastrophes GDACS (JRC/OCHA)",
-            "emoji": "🚨", "color": "#e67e22", "status": "context",
-            "detail": "Inondations, cyclones, séismes, sécheresses, feux",
-        })
-
-    # ── 7. GDELT (signal médiatique) ──────────────────────────────
-    if (_RAW_DIR / f"gdelt_{hospital_key}.csv").exists():
-        sources.append({
-            "label": "Signal médiatique GDELT 2.0",
-            "emoji": "📰", "color": "#e84393", "status": "context",
-            "detail": "Volume / tonalité : énergie, météo, santé, désastres",
-        })
-
-    # ── 8. NOAA Storm Events (USA) ────────────────────────────────
-    if hospital_key == "phoenix_usa" and (
-        _RAW_DIR / "noaa_storm" / "storm_events_details_2022.csv"
-    ).exists():
-        sources.append({
-            "label": "NOAA Storm Events (USA)",
-            "emoji": "🌩️", "color": "#34495e", "status": "context",
-            "detail": "Tempêtes, tornades, vagues de chaleur (Arizona)",
+            "emoji": "⚡", "color": "#e67e22", "status": "missing",
+            "detail": (
+                f"Snapshot absent (zone {zone}) — nécessite "
+                "ELECTRICITY_MAPS_TOKEN + "
+                "`python -m src.data.ingest_electricitymaps`"
+            ),
         })
 
     return sources
 
 
 def _neutralize_external_signals(df: pd.DataFrame, hospital_key: str) -> pd.DataFrame:
-    """Pour un hôpital ≠ lacor_uganda, met à 0 toutes les colonnes dérivées
-    de signaux externes site-spécifiques (médias GDELT, catastrophes GDACS,
-    sismique USGS, qualité de l'air, tempêtes NOAA). Ces signaux n'ont de
-    sens que pour le site dont ils proviennent.
-
-    Sans ce nettoyage, l'inférence peut utiliser des signaux non disponibles
-    (ou provenant d'un autre site), ce qui dégrade la robustesse.
-    """
+    """Hors Lacor : met à 0 les colonnes `em_*` (réseau Electricity Maps)."""
     if hospital_key == "lacor_uganda":
         return df
     df = df.copy()
@@ -609,10 +654,13 @@ def load_global_shap_importance() -> pd.DataFrame | None:
         return None
 
 
-@st.cache_data
+def electricitymaps_snapshot_path(hospital_key: str) -> Path:
+    return ROOT / "data" / "raw" / f"electricitymaps_{hospital_key}.csv"
+
+
 def load_electricitymaps_snapshot(hospital_key: str) -> pd.DataFrame | None:
     """Charge le CSV Electricity Maps d'un hôpital (si disponible)."""
-    path = ROOT / "data" / "raw" / f"electricitymaps_{hospital_key}.csv"
+    path = electricitymaps_snapshot_path(hospital_key)
     if not path.exists():
         return None
     try:

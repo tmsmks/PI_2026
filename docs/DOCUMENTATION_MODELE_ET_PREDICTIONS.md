@@ -1,8 +1,9 @@
 # Documentation du modèle et des calculs de prédiction
 
-> **Mise à jour 2026-05** — ce document décrit la run courante du pipeline
-> (`models/training_summary.json`).
-> Modèle gagnant : **LightGBM**.
+> **Mise à jour 2026-06** — modèle Lacor unique :
+> **nowcast** (`calibrated_model.joblib`, ~54 features, historique coupures) +
+> **horizons 1/3/6 h** (`nowcast_horizons/`, mêmes features, cible = coupure future).
+> Métriques : `models/training_summary.json` et `models/nowcast_horizons/horizons_summary.json`.
 
 ## Table des matières
 
@@ -14,8 +15,9 @@
 6. [Calibration des probabilités](#6-calibration-des-probabilités)
 7. [Évaluation et résultats](#7-évaluation-et-résultats)
 8. [Interprétabilité — SHAP (explications locales)](#8-interprétabilité--shap-explications-locales)
-9. [Calcul de la prédiction historique (onglet 1)](#9-calcul-de-la-prédiction-historique-onglet-1)
-10. [Calcul de la prédiction prévisionnelle J+7 (onglet 2)](#10-calcul-de-la-prédiction-prévisionnelle-j7-onglet-2)
+9. [Calcul de la prédiction historique (onglet « Analyse historique »)](#9-calcul-de-la-prédiction-historique-onglet-analyse-historique)
+10. [Calcul de la prédiction prévisionnelle J+7](#10-calcul-de-la-prédiction-prévisionnelle-j7-onglet-2)
+10 bis. [Prédiction « Prochaine coupure » (horizons + temps réel)](#10-bis-prédiction-prochaine-coupure-horizons--temps-réel)
 11. [Simulation manuelle — construction d'un scénario](#11-simulation-manuelle--construction-dun-scénario)
 12. [Correction d'extrapolation (stress hors distribution)](#12-correction-dextrapolation-stress-hors-distribution)
 13. [Ajustement par profil d'hôpital](#13-ajustement-par-profil-dhôpital)
@@ -31,11 +33,13 @@ Le pipeline transforme les données brutes en prédictions de coupure en
 plusieurs étapes :
 
 ```
-Données brutes              Features                  GridSearch          Gagnant       Calibration       SHAP
-──────────────              ────────                  ──────────          ────────      ───────────       ────
-multi-hôpitaux  ──►   `hospital_merged.csv`  ──►  RF / XGB / LGBM  ──►  LightGBM  ──►  Isotonique  ──►  TreeExp
-                       `features_dataset.csv`     TimeSeriesSplit       (run                          (échantillon
-                                                  5 folds (3 en fast)   courante)     (3 folds)        contrôlable)
+Données brutes     Features              Nowcast (étape 4)              Horizons (étape 5)
+──────────────     ────────              ─────────────────              ──────────────────
+multi-hôpitaux ──► features_dataset ──► RF/XGB/LGBM + SHAP ──► calibrated_model.joblib
+                       │                    (cible: is_outage)         │
+                       └──────────────────────────────────────────────► train_horizons
+                                                                            (cibles 1/3/6 h)
+                                                                            → nowcast_horizons/
 ```
 
 ### Fichiers impliqués
@@ -43,11 +47,11 @@ multi-hôpitaux  ──►   `hospital_merged.csv`  ──►  RF / XGB / LGBM  
 | Étape | Script | Entrée | Sortie |
 |-------|--------|--------|--------|
 | Feature engineering | `src/features/build_features.py` | `data/processed/hospital_merged.csv` | `data/features/features_dataset.csv` |
-| Entraînement | `src/models/train_baseline.py` | `data/features/features_dataset.csv` | `models/calibrated_model.joblib` + `models/baseline_model.joblib` |
+| Entraînement nowcast | `src/models/train_baseline.py` | `data/features/features_dataset.csv` | `models/calibrated_model.joblib` + `models/baseline_model.joblib` |
+| Entraînement horizons 1/3/6 h | `src/models/train_horizons.py` | Lacor dans `features_dataset.csv` | `models/nowcast_horizons/horizon_{1,3,6}h/` |
 | Comparaison + métriques | `src/models/train_baseline.py` | tous les modèles | `models/model_comparison.csv` + `models/training_summary.json` |
-| Importance MDI | `src/models/train_baseline.py` | Modèle gagnant | `models/feature_importance.csv` |
-| SHAP | `src/models/train_baseline.py` | Modèle + test set | `models/shap_explainer.joblib` + `models/shap_values.npz` + `models/shap_feature_importance.csv` |
-| Prédiction (app) | `app.py` | Modèle calibré + features | Probabilité + waterfall SHAP |
+| Importance MDI / SHAP | `src/models/train_baseline.py` | Modèle gagnant | `models/feature_importance.csv`, `models/shap_*` |
+| Prédiction (app) | `app.py`, `src/nowcast_horizons.py`, `src/realtime_forecast.py` | Nowcast + horizons + APIs live | Probabilité + waterfall SHAP |
 
 > Note : les fichiers `baseline_model.joblib` et `calibrated_model.joblib`
 > contiennent le **gagnant courant** de la comparaison RF / XGBoost / LightGBM
@@ -133,7 +137,6 @@ voir que le passé strict, et restent donc dans X :
 | `wind_precipitation_interaction` | `wind_speed_10m × precipitation` | Intensité des intempéries |
 | `solar_available` | `1 si shortwave_radiation > 50 W/m²` | Énergie solaire disponible |
 | `heat_stress` | `1 si temperature_2m > 30°C` | Stress thermique |
-| `storm_risk` | `1 si wind > 40 km/h OU precipitation > 10 mm` | Conditions de tempête |
 | `cloud_cover_pct` | `cloud_cover` ou proxy via rayonnement | Couverture nuageuse |
 | `dew_point_2m` | brute si dispo, sinon Magnus | Point de rosée |
 | `visibility_m` | brute si dispo | Visibilité |
@@ -143,20 +146,52 @@ voir que le passé strict, et restent donc dans X :
 | `humidity_change_3h` | `Δhumidité sur 3 h` | Variation |
 | `pressure_change_3h` | `Δpression sur 3 h` | Front orageux |
 
-`storm_risk`, `cloud_cover` (brut), `visibility` (brut) et
-`et0_fao_evapotranspiration` (brut) sont **exclus** par `COLS_TO_DROP`
-(redondance avec leurs versions dérivées).
+`cloud_cover` (brut), `visibility` (brut) et `et0_fao_evapotranspiration`
+(brut) sont **exclus** par `COLS_TO_DROP` dans `src/utils/config.py`
+(redondance avec leurs versions dérivées). L'ancienne feature `storm_risk`
+n'est **plus calculée** (juin 2026) ; si elle subsiste dans un vieux CSV,
+elle reste listée dans `COLS_TO_DROP`.
 
-### 2.6. Features externes (qualité air, sismique, GDACS, GDELT, NOAA, EM)
+### 2.6. Contexte réseau (`em_*`) — exclu du modèle
 
-Toutes les variables `air_*`, `eq_*`, `gdacs_*`, `gdelt_*`, `storm_*`
-(USA), `em_*` sont **incluses** dans X (sauf `storm_risk` exclue par
-`COLS_TO_DROP`).
+Les colonnes Electricity Maps (`em_total_load_mw`, `em_carbon_intensity_gco2_kwh`,
+mix renouvelable/fossile, etc.) sont fusionnées dans `features_dataset.csv` mais
+**exclues** du jeu d'entraînement via `EXTERNAL_SIGNAL_PREFIXES = ("em_",)` dans
+`config.py` et `drop_external_signal_columns()` dans `train_baseline.py`.
 
-Pour les hôpitaux en mode `africa_grid` (clones du profil Lacor) ou pour
-les sites NHS / NYC, l'app neutralise à 0 ces signaux site-spécifiques
-via `_neutralize_external_signals` dans `app.py` afin d'éviter de prédire
-un site avec les épidémies / séismes / pollution d'un autre.
+**Pourquoi :** indisponibles à l'échelle d'un hôpital isolé et source de décalage
+entraînement/service. Elles restent exploitées en **contexte** dans l'app (bandeau
+réseau, estimation de charge pour `africa_grid`, pipeline
+`src/realtime_forecast.py`).
+
+Les anciennes familles externes (`gdelt_*`, `gdacs_*`, `eq_*`, `air_*`,
+`storm_*` NOAA) ont été **retirées du projet** après évaluation (cf.
+[`DOCUMENTATION_DONNEES_ET_APIS.md`](DOCUMENTATION_DONNEES_ET_APIS.md) §8).
+
+### 2.7. Modèles horizons 1/3/6 h (onglet « Prochaine coupure »)
+
+Script canonique : `src/models/train_horizons.py` →
+`models/nowcast_horizons/horizons_summary.json`.
+
+| Attribut | Valeur |
+|----------|--------|
+| **Cible** | Coupure dans les 1, 3 ou 6 prochaines heures (un modèle par horizon) |
+| **Features** | **Même jeu que le nowcast** (~54 features, historique coupures inclus) |
+| **Algorithme** | Même famille que le gagnant `train_baseline` (hyperparamètres repris) |
+| **Calibration** | IsotonicRegression sur holdout chronologique final (20 %) |
+| **Évaluation** | Backtest walk-forward mensuel (train mois &lt; M, test mois M) |
+
+**Métriques walk-forward indicatives (run juin 2026, Lacor 2022) :**
+
+| Horizon | F1 | ROC AUC | Recall | Precision | Brier |
+|---------|-----|---------|--------|-----------|-------|
+| 1 h | 0.72 | 0.92 | 0.71 | 0.77 | 0.039 |
+| 3 h | 0.70 | 0.90 | 0.74 | 0.68 | 0.073 |
+| 6 h | 0.70 | 0.89 | 0.77 | 0.66 | 0.105 |
+
+**Inférence :** `src/nowcast_horizons.py` — prédiction à l’instant `ref_ts` ;
+repli sur agrégation du nowcast horaire si bundles absents. Temps réel :
+`src/realtime_forecast.py` (fenêtre EM + météo).
 
 ---
 
@@ -164,32 +199,18 @@ un site avec les épidémies / séismes / pollution d'un autre.
 
 ### 3.1. Sélection des features (`COLS_TO_DROP`)
 
-Code source — `src/models/train_baseline.py` :
+Liste centralisée dans **`src/utils/config.py`** (`COLS_TO_DROP`) — utilisée
+par `train_baseline.prepare_data()` et par `app.get_feature_columns()`.
 
-```python
-COLS_TO_DROP = [
-    "datetime",                        # Identifiant
-    "is_outage",                       # Variable cible
-    # Colonnes avec fuite directe (connues uniquement pendant la coupure)
-    "grid_availability_ratio",
-    "generators_kw",
-    "generator_active",
-    "generator_ratio",
-    "grid_availability_rolling_6h",
-    "recent_outages_6h",
-    "recent_outages_24h",
-    # Constantes sur la série mono-hôpital
-    "storm_risk",
-    # Colonnes brutes météo redondantes avec les features dérivées
-    "cloud_cover",
-    "visibility",
-    "et0_fao_evapotranspiration",
-]
-```
+Exclusions principales :
+- identifiants et cible (`datetime`, `is_outage`, `hospital`) ;
+- fuite directe (`grid_available`, `grid_availability_ratio`, `recent_outages_*`, …) ;
+- colonnes météo brutes redondantes (`cloud_cover`, `visibility`, …) ;
+- legacy `storm_risk` (plus calculée depuis juin 2026).
 
-`prepare_data` retire ensuite toutes les colonnes non-numériques (string
-`hospital`, `em_zone`…). Le nombre exact de features utilisées dépend des
-colonnes présentes dans `features_dataset.csv` au moment du run.
+`prepare_data` applique aussi `drop_external_signal_columns()` → toutes les
+colonnes `em_*` sont exclues du modèle. **Run courante : 54 features**
+numériques (scope `real`, Lacor seul).
 
 > 💡 La cohérence features ↔ modèle est protégée côté app : si
 > `features_dataset.csv` est régénéré sans réentraîner (ou inversement),
@@ -323,7 +344,7 @@ run courante :
 | Random Forest | 0.1235 |
 
 L'écart entre LightGBM et RF traduit la difficulté du RF à capter les
-interactions non linéaires entre signaux exogènes (météo, EM, GDELT…) sur
+interactions non linéaires entre signaux (météo, charge, temporel) sur
 ce dataset multi-hôpitaux déséquilibré.
 
 ---
@@ -392,11 +413,10 @@ Source : `models/shap_feature_importance.csv` (LightGBM calibré).
 | 10 | `pressure_change_3h` | 7.88 | Météo |
 | 11 | `load_rolling_6h` | 7.83 | Énergie |
 | 12 | `hour` | 6.77 | Temporel |
-| 13 | `air_carbon_monoxide` | 6.60 | Air quality |
 | 14 | `outage_frequency_7d` | 5.96 | Historique coupures |
 | 15 | `temperature_2m` | 5.18 | Météo |
 
-**Lecture rapide :**
+**Lecture rapide (nowcast, scope `real`, 54 features) :**
 - Le **temps écoulé depuis la dernière coupure** est de loin le facteur
   dominant — la cible est très auto-corrélée à court terme.
 - Les variables **énergétiques** (`base_load_kw`, `total_load_kw`,
@@ -405,9 +425,9 @@ Source : `models/shap_feature_importance.csv` (LightGBM calibré).
 - Les variables **météo** (`dew_point_2m`, `thermal_amplitude_24h`,
   `evapotranspiration`, `pressure_change_3h`, `temperature_2m`) capturent
   le contexte climatique.
-- Les **variables événementielles** (GDELT, GDACS, USGS, NOAA) ont une
-  importance globale très faible — elles sont utiles ponctuellement mais
-  rares à l'échelle du jeu fusionné.
+
+> Le panneau « Sources & facteurs du modèle » affiche l'importance SHAP du
+> **nowcast** (`models/shap_feature_importance.csv`), incluant l'historique des coupures.
 
 ---
 
@@ -450,16 +470,18 @@ via `show_shap_waterfall` :
 
 - Barres **rouges** : features qui poussent vers la coupure
 - Barres **vertes** : features qui réduisent le risque
-- Préfixe emoji par catégorie (énergie, météo, air, etc.)
+- Préfixe emoji par catégorie (énergie, météo, temporel, etc.)
 - La **base** (`expected_value`) représente la prédiction moyenne
 
 ---
 
-## 9. Calcul de la prédiction historique (onglet 1)
+## 9. Calcul de la prédiction historique (onglet « Analyse historique »)
 
-L'onglet « Prédiction en temps réel » de l'app Streamlit (code dans
-`app.py`, section `with tab_predict`) propose une **analyse sur la
-période de votre choix**.
+L'onglet **« Analyse historique (par période) »** de l'app Streamlit (code dans
+`app.py`, section `with tab_predict`) propose une **analyse sur la période de
+votre choix** avec le modèle **nowcast** (54 features, inclut l'historique des
+coupures). L'onglet « Prochaine coupure » utilise les modèles **horizons**
+(même features, cible future).
 
 ### Étape 1 : Choix de la période
 
@@ -553,7 +575,7 @@ Pour chaque heure future du CSV de prévisions :
 1. Trouver dans l'historique `df` la **ligne historique la plus
    similaire** (même heure, même mois, même jour-type, température
    proche) via `_match_similar_historical_row`.
-2. Cloner ses features (rolling, énergie, événementiels) puis
+2. Cloner ses features (rolling, énergie, historique coupures) puis
    **remplacer la météo** par les variables prévisionnelles :
    `temperature_2m`, `relative_humidity_2m`, `dew_point_2m`,
    `wind_speed_10m`, `wind_gusts_10m`, `precipitation`,
@@ -573,6 +595,43 @@ Pour chaque heure future du CSV de prévisions :
 - Synthèse par jour : `proba_max`, `proba_mean`, `heures_risque (>50%)`,
   `temp_max`, `pluie_mm`
 - Top 5 heures les plus à risque
+
+> Cet onglet utilise le modèle **nowcast** (`calibrated_model.joblib`).
+
+---
+
+## 10 bis. Prédiction « Prochaine coupure » (horizons + temps réel)
+
+Onglet principal pour la **prédiction opérationnelle** : probabilité de coupure
+dans 1 h, 3 h et 6 h à partir des **dernières 24 h** (conso estimée ou réelle +
+météo + charge réseau).
+
+### Sources des 24 dernières heures
+
+| Mode | Hôpitaux | Données |
+|------|----------|---------|
+| Historique Lacor | `lacor_uganda` | `features_dataset` (replay 2022) |
+| Temps réel | `africa_grid`, Lacor (option) | Electricity Maps + Open-Meteo Forecast via `src/realtime_forecast.py` |
+
+Pour `africa_grid`, la consommation est **estimée** à partir de la charge réseau
+zone puis **mise à l'échelle** sur la moyenne Lacor (`LACOR_REF_AVG ≈ 133 kW`)
+pour éviter la saturation du modèle.
+
+### Chaîne de calcul
+
+```
+API EM (charge 24 h) + API météo (archive + forecast)
+        → build_realtime_window()
+        → apply_feature_engineering_single()  # historique coupure si connu
+        → bundle nowcast_horizons/horizon_{1,3,6}h
+        → predict_proba → calibrator isotonique
+```
+
+### Contexte affiché (hors modèle)
+
+- Bandeau Electricity Maps (charge, carbone, mix)
+- EskomSePush pour Groote Schuur (délestage programmé RSA)
+- Panneau orage (pluie, rafales, CAPE forecast) — informatif uniquement
 
 ---
 
@@ -867,9 +926,12 @@ l'importance SHAP (cf. [section 7.2](#72-top-15-features-shap-run-courante)).
 | Calibration isotonique des probabilités | ✅ |
 | Explications locales SHAP (TreeExplainer + waterfall) | ✅ |
 | Pipeline multi-hôpitaux (16 sites temps réel) | ✅ |
+| Modèles horizons 1/3/6 h (mêmes features que nowcast) | ✅ |
 | Mode `--mode live` pour fenêtre glissante récente | ✅ |
 | Onglet « Prévisions J+7 » via Open-Meteo Forecast | ✅ |
-| Bandeau temps réel Electricity Maps | ✅ |
+| Onglet « Prochaine coupure » (horizons + temps réel EM) | ✅ |
+| Bandeau temps réel Electricity Maps + EskomSePush (RSA) | ✅ |
+| Retrait signaux externes testés inutiles (preuves JSON conservées) | ✅ |
 | Garde-fou de cohérence features ↔ modèle | ✅ |
 | Persistance des résultats via `st.session_state` | ✅ |
 | Sélection de période (presets / custom) | ✅ |
@@ -884,6 +946,7 @@ l'importance SHAP (cf. [section 7.2](#72-top-15-features-shap-run-courante)).
 | **Modèle de durée** : régression dédiée pour la durée de coupure | Moyenne | Prédictions plus précises |
 | **Modèle séquentiel** (LSTM / Transformer) : dépendances temporelles longues | Élevée | Meilleure détection des patterns multi-jours |
 | **Cible réelle multi-sites** : ingérer des outage logs publics (NHS, ConEd…) | Moyenne | Réduit la sur-spécialisation Lacor |
+| **Réintégrer signaux externes** uniquement si validés walk-forward sur Lacor | Moyenne | Déjà testé négativement (cf. JSON d'expérience) |
 | **Seuil de classification optimisé** : trouver le seuil F1-optimal du calibré | Faible | Meilleur recall sans perte de precision |
 | **Streaming Lacor temps réel** : si une API ougandaise devient disponible | Moyenne | Prédiction live vraie (vs quasi temps réel) |
 

@@ -172,22 +172,43 @@ def resolve_zone(
 # ──────────────────────────────────────────────────────────────────────
 # Parsing : conversion d'une réponse "history" en DataFrame
 # ──────────────────────────────────────────────────────────────────────
-def _history_to_df(payload: dict, value_keys: list[str], rename: dict[str, str]) -> pd.DataFrame:
+def _history_to_df(
+    payload: dict,
+    value_keys: list[str],
+    rename: dict[str, str],
+    *,
+    fallback_scalar: str = "value",
+) -> pd.DataFrame:
     """Convertit une réponse `/history` ou `/past-range` en DataFrame.
 
     Les payloads d'Electricity Maps suivent toujours la même forme :
         {"zone": "FR", "history": [{"datetime": "...", <champs>}, ...]}
-    On extrait `datetime` + chaque clé demandée et on renomme.
+    Depuis 2024+, la charge et le carbone arrivent souvent sous la clé
+    générique `value` plutôt que `totalLoad` / `carbonIntensity`.
     """
     items = payload.get("history") or payload.get("data") or []
     if not items:
         return pd.DataFrame()
-    df = pd.DataFrame(items)
-    if "datetime" not in df.columns:
+
+    out_col = next(iter(rename.values()))
+    rows: list[dict] = []
+    for entry in items:
+        ts = entry.get("datetime")
+        if not ts:
+            continue
+        val = None
+        for k in value_keys:
+            if k in entry and entry[k] is not None:
+                val = entry[k]
+                break
+        if val is None and fallback_scalar in entry:
+            val = entry.get(fallback_scalar)
+        rows.append({"datetime": ts, out_col: val})
+
+    if not rows:
         return pd.DataFrame()
+    df = pd.DataFrame(rows)
     df["datetime"] = pd.to_datetime(df["datetime"]).dt.tz_localize(None)
-    keep = ["datetime"] + [k for k in value_keys if k in df.columns]
-    df = df[keep].rename(columns=rename)
     return df
 
 
@@ -201,8 +222,8 @@ def fetch_total_load_history(zone: str, token: str) -> pd.DataFrame:
         return pd.DataFrame()
     return _history_to_df(
         payload,
-        value_keys=["totalLoad", "total_load"],
-        rename={"totalLoad": "em_total_load_mw", "total_load": "em_total_load_mw"},
+        value_keys=["totalLoad", "total_load", "value"],
+        rename={"totalLoad": "em_total_load_mw"},
     )
 
 
@@ -213,11 +234,8 @@ def fetch_carbon_intensity_history(zone: str, token: str) -> pd.DataFrame:
         return pd.DataFrame()
     return _history_to_df(
         payload,
-        value_keys=["carbonIntensity", "carbon_intensity"],
-        rename={
-            "carbonIntensity": "em_carbon_intensity_gco2_kwh",
-            "carbon_intensity": "em_carbon_intensity_gco2_kwh",
-        },
+        value_keys=["carbonIntensity", "carbon_intensity", "value"],
+        rename={"carbonIntensity": "em_carbon_intensity_gco2_kwh"},
     )
 
 
@@ -298,8 +316,8 @@ def fetch_total_load_range(zone: str, token: str, start: datetime, end: datetime
         return pd.DataFrame()
     return _history_to_df(
         payload,
-        value_keys=["totalLoad", "total_load"],
-        rename={"totalLoad": "em_total_load_mw", "total_load": "em_total_load_mw"},
+        value_keys=["totalLoad", "total_load", "value"],
+        rename={"totalLoad": "em_total_load_mw"},
     )
 
 
@@ -313,11 +331,8 @@ def fetch_carbon_intensity_range(zone: str, token: str, start: datetime, end: da
         return pd.DataFrame()
     return _history_to_df(
         payload,
-        value_keys=["carbonIntensity", "carbon_intensity"],
-        rename={
-            "carbonIntensity": "em_carbon_intensity_gco2_kwh",
-            "carbon_intensity": "em_carbon_intensity_gco2_kwh",
-        },
+        value_keys=["carbonIntensity", "carbon_intensity", "value"],
+        rename={"carbonIntensity": "em_carbon_intensity_gco2_kwh"},
     )
 
 

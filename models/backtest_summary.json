@@ -1,51 +1,51 @@
 {
-  "model": "RandomForest",
-  "n_features": 49,
+  "model": "LightGBM",
+  "n_features": 48,
   "decision_threshold": 0.5,
   "holdout_chrono_train1_9_test10_12": {
-    "accuracy": 0.9579,
-    "precision": 0.8069,
-    "recall": 0.7512,
-    "f1": 0.778,
-    "roc_auc": 0.9769,
-    "brier": 0.0404
+    "accuracy": 0.9805,
+    "precision": 0.8884,
+    "recall": 0.9171,
+    "f1": 0.9025,
+    "roc_auc": 0.9953,
+    "brier": 0.0154
   },
   "walk_forward_aggregate": {
     "f1": {
-      "mean": 0.7506,
-      "std": 0.0432,
-      "min": 0.7091,
-      "max": 0.8112
+      "mean": 0.8319,
+      "std": 0.1388,
+      "min": 0.6415,
+      "max": 0.9865
     },
     "precision": {
-      "mean": 0.7803,
-      "std": 0.0428,
-      "min": 0.7101,
-      "max": 0.8406
+      "mean": 0.8635,
+      "std": 0.0987,
+      "min": 0.7391,
+      "max": 0.9865
     },
     "recall": {
-      "mean": 0.725,
-      "std": 0.0564,
-      "min": 0.65,
-      "max": 0.8116
+      "mean": 0.8075,
+      "std": 0.1714,
+      "min": 0.5667,
+      "max": 0.9865
     },
     "roc_auc": {
-      "mean": 0.9605,
-      "std": 0.0295,
-      "min": 0.9163,
-      "max": 0.9903
+      "mean": 0.9623,
+      "std": 0.0442,
+      "min": 0.8878,
+      "max": 0.9996
     },
     "brier": {
-      "mean": 0.0458,
-      "std": 0.0119,
-      "min": 0.03,
-      "max": 0.0662
+      "mean": 0.0264,
+      "std": 0.0186,
+      "min": 0.0059,
+      "max": 0.0575
     },
     "accuracy": {
-      "mean": 0.9529,
-      "std": 0.0099,
-      "min": 0.9355,
-      "max": 0.9637
+      "mean": 0.9696,
+      "std": 0.0246,
+      "min": 0.9288,
+      "max": 0.9973
     }
   },
   "walk_forward_n_folds": 6,

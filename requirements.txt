@@ -14,3 +14,5 @@ shap==0.51.0
 # Lecture/écriture parquet (≥10× plus rapide que CSV pour
 # features_dataset & hospital_merged). Fallback CSV silencieux si absent.
 pyarrow==18.1.0
+# Tests (suite tests/test_methodology.py)
+pytest==9.0.3

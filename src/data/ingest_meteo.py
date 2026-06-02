@@ -51,8 +51,7 @@ def run(
 ) -> None:
     """Récupère la météo historique sur une plage de dates."""
     # try/except par hôpital : un seul timeout Open-Meteo ne doit pas
-    # casser l'ingestion des 18 autres sites (cohérence avec les autres
-    # ingesters comme ingest_air_quality).
+    # casser l'ingestion des autres sites.
     for name, coords in HOSPITAL_LOCATIONS.items():
         try:
             df = fetch_meteo_archive(

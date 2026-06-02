@@ -9,12 +9,12 @@ Catalogue centralisé des hôpitaux couverts par le projet.
 
 `HOSPITAL_LOCATIONS` (dans `config.py`) est désormais DÉRIVÉ de ce dict
 pour les sites qui doivent être ingérés par les pipelines géolocalisés
-(Open-Meteo, USGS, GDACS, Electricity Maps, etc.).
+(Open-Meteo, Electricity Maps, etc.).
 
 Conventions :
-  - country : code ISO3 (utilisé par GDACS_FILTERS et NOAA_STORM_FILTERS)
+  - country : code ISO3
   - data_source absent ⇒ site de référence (Lacor) ou ingéré avec un
-    pipeline dédié (ex. Phoenix via NOAA)
+    pipeline dédié
 """
 
 from __future__ import annotations
@@ -208,21 +208,6 @@ HOSPITAL_DISPLAY: dict[str, dict] = {
         "data_source": "africa_grid",
         "ingest_geo": True,
     },
-    # ── Phoenix (USA) — site de référence NOAA / signal médiatique ──
-    "phoenix_usa": {
-        "name": "Phoenix (référence NOAA)",
-        "location": "Phoenix, Arizona",
-        "flag": "🇺🇸",
-        "beds": 0,
-        "type": "Site benchmark (USA SW)",
-        "who_reliability": 99.0,
-        "lat": 33.45, "lon": -112.07, "country": "USA",
-        "avg_load_kw": 0, "max_load_kw": 0,
-        "has_solar": False, "has_generator": False,
-        "grid_stability": "stable",
-        "ingest_geo": True,
-        "ui_hidden": True,
-    },
     # ── Hôpitaux NHS (source : ERIC 2022-23) ────────────────────────
     "st_thomas_nhs": {
         "name": "St Thomas' Hospital",
@@ -318,6 +303,7 @@ HOSPITAL_DISPLAY: dict[str, dict] = {
         "data_source": "eric", "eric_code": "rj122",
         "floor_area_m2": 82_000,
         "annual_electricity_kwh": 48_000_000,
+        "ingest_geo": True,
     },
     "leeds_general_nhs": {
         "name": "Leeds General Infirmary",
@@ -333,6 +319,7 @@ HOSPITAL_DISPLAY: dict[str, dict] = {
         "data_source": "eric", "eric_code": "rr801",
         "floor_area_m2": 100_000,
         "annual_electricity_kwh": 52_000_000,
+        "ingest_geo": True,
     },
     "birmingham_heartlands_nhs": {
         "name": "Birmingham Heartlands Hospital",
@@ -348,6 +335,7 @@ HOSPITAL_DISPLAY: dict[str, dict] = {
         "data_source": "eric", "eric_code": "rq301",
         "floor_area_m2": 95_000,
         "annual_electricity_kwh": 46_000_000,
+        "ingest_geo": True,
     },
     "newcastle_rvi_nhs": {
         "name": "Royal Victoria Infirmary",
@@ -363,6 +351,7 @@ HOSPITAL_DISPLAY: dict[str, dict] = {
         "data_source": "eric", "eric_code": "ra701",
         "floor_area_m2": 130_000,
         "annual_electricity_kwh": 68_000_000,
+        "ingest_geo": True,
     },
     "royal_devon_nhs": {
         "name": "Royal Devon and Exeter Hospital",
@@ -378,6 +367,7 @@ HOSPITAL_DISPLAY: dict[str, dict] = {
         "data_source": "eric", "eric_code": "ra401",
         "floor_area_m2": 80_000,
         "annual_electricity_kwh": 38_000_000,
+        "ingest_geo": True,
     },
     "nyc_bellevue": {
         "name": "Bellevue Hospital Center",
@@ -393,6 +383,7 @@ HOSPITAL_DISPLAY: dict[str, dict] = {
         "data_source": "nyc_ll84", "nyc_code": "nyc_bellevue",
         "floor_area_m2": 211_475,
         "annual_electricity_kwh": 52_960_248,
+        "ingest_geo": True,
     },
     "nyc_nyu_tisch": {
         "name": "NYU Langone Tisch Hospital",
@@ -408,6 +399,7 @@ HOSPITAL_DISPLAY: dict[str, dict] = {
         "data_source": "nyc_ll84", "nyc_code": "nyc_nyu_tisch",
         "floor_area_m2": 64_040,
         "annual_electricity_kwh": 45_139_152,
+        "ingest_geo": True,
     },
     "nyc_nyp_brooklyn": {
         "name": "NewYork-Presbyterian Brooklyn Methodist",
@@ -423,6 +415,7 @@ HOSPITAL_DISPLAY: dict[str, dict] = {
         "data_source": "nyc_ll84", "nyc_code": "nyc_nyp_brooklyn",
         "floor_area_m2": 126_587,
         "annual_electricity_kwh": 32_396_762,
+        "ingest_geo": True,
     },
     "nyc_elmhurst": {
         "name": "Elmhurst Hospital Center",
@@ -438,6 +431,7 @@ HOSPITAL_DISPLAY: dict[str, dict] = {
         "data_source": "nyc_ll84", "nyc_code": "nyc_elmhurst",
         "floor_area_m2": 89_366,
         "annual_electricity_kwh": 30_507_199,
+        "ingest_geo": True,
     },
     "nyc_lincoln": {
         "name": "Lincoln Medical Center",
@@ -453,13 +447,14 @@ HOSPITAL_DISPLAY: dict[str, dict] = {
         "data_source": "nyc_ll84", "nyc_code": "nyc_lincoln",
         "floor_area_m2": 110_874,
         "annual_electricity_kwh": 31_236_421,
+        "ingest_geo": True,
     },
 }
 
 
 def build_hospital_locations() -> dict[str, dict]:
     """Sous-ensemble géolocalisé : sites pour lesquels on lance les
-    pipelines d'ingestion géo (Open-Meteo, USGS, GDACS, Electricity Maps).
+    pipelines d'ingestion géo (Open-Meteo, Electricity Maps).
 
     Marqués par `ingest_geo: True` dans `HOSPITAL_DISPLAY`. Reproduit
     fidèlement l'ancien dict statique de `config.py`, mais maintenant

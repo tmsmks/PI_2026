@@ -5,8 +5,8 @@ Stratégie :
   1. Dataset principal = Lacor Hospital (15 min, 2022)
      → rééchantillonné à l'heure pour aligner avec la météo
   2. Météo historique 2022 (Open-Meteo Archive, horaire) → jointure temporelle
-  3. Signaux externes (air quality, USGS, GDACS, GDELT, NOAA, Electricity Maps)
-     → fusion par hôpital sur l'horodatage le plus proche
+  3. Contexte réseau Electricity Maps (`em_*`) → fusion par hôpital sur
+     l'horodatage le plus proche (affiché comme contexte, exclu du modèle)
 
 Le résultat est un DataFrame horaire unique prêt pour le feature engineering.
 """
@@ -110,60 +110,6 @@ def merge_with_meteo(consumption: pd.DataFrame, meteo: pd.DataFrame) -> pd.DataF
     return merged
 
 
-def add_gdelt_signal(df: pd.DataFrame, hospital: str = "lacor_uganda") -> pd.DataFrame:
-    """Fusionne le signal événementiel GDELT (broadcast horaire).
-
-    Colonnes ajoutées : gdelt_power_vol, gdelt_power_tone,
-    gdelt_weather_vol, gdelt_weather_tone, gdelt_health_vol,
-    gdelt_health_tone.
-    """
-    path = RAW_DIR / f"gdelt_{hospital}.csv"
-    try:
-        gdelt = load_csv(path)
-    except FileNotFoundError:
-        logger.warning("Signal GDELT absent (%s) — ignoré.", path.name)
-        return df
-
-    gdelt["datetime"] = pd.to_datetime(gdelt["datetime"])
-    gdelt_cols = [c for c in gdelt.columns if c.startswith("gdelt_")]
-    merged = pd.merge_asof(
-        df.sort_values("datetime"),
-        gdelt[["datetime"] + gdelt_cols].sort_values("datetime"),
-        on="datetime",
-        direction="nearest",
-        tolerance=pd.Timedelta("1h"),
-    )
-    merged[gdelt_cols] = merged[gdelt_cols].fillna(0)
-    logger.info("Signal GDELT fusionné : %d colonnes ajoutées", len(gdelt_cols))
-    return merged
-
-
-def add_noaa_storm_signal(df: pd.DataFrame, hospital: str) -> pd.DataFrame:
-    """Fusionne les événements NOAA Storm Events (USA uniquement).
-
-    Si aucun fichier NOAA n'existe pour l'hôpital (site hors USA),
-    la fonction est silencieuse et retourne df inchangé.
-    """
-    path = RAW_DIR / f"noaa_storm_{hospital}.csv"
-    if not path.exists():
-        logger.info("Pas de données NOAA pour %s — ignoré.", hospital)
-        return df
-
-    storm = load_csv(path)
-    storm["datetime"] = pd.to_datetime(storm["datetime"])
-    storm_cols = [c for c in storm.columns if c.startswith("storm_")]
-    merged = pd.merge_asof(
-        df.sort_values("datetime"),
-        storm[["datetime"] + storm_cols].sort_values("datetime"),
-        on="datetime",
-        direction="nearest",
-        tolerance=pd.Timedelta("1h"),
-    )
-    merged[storm_cols] = merged[storm_cols].fillna(0)
-    logger.info("Signal NOAA fusionné : %d colonnes ajoutées", len(storm_cols))
-    return merged
-
-
 def _merge_external_signal(
     df: pd.DataFrame,
     path: "pd.PathLike",
@@ -172,10 +118,9 @@ def _merge_external_signal(
 ) -> pd.DataFrame:
     """Fusion générique d'une série externe horaire identifiée par préfixe.
 
-    Toutes nos sources externes (air quality, USGS, GDACS, NOAA, GDELT)
-    suivent la même structure : un CSV horaire dont les colonnes utiles
-    commencent par `column_prefix`. Cette fonction les fusionne sur
-    `datetime` avec tolérance 1 h et remplit les manquants avec 0.
+    Utilisé pour Electricity Maps (`em_*`) : un CSV horaire dont les colonnes
+    utiles commencent par `column_prefix`. Fusion sur `datetime` (tolérance
+    1 h), manquants → 0.
     """
     if not path.exists():
         logger.info("Pas de données %s pour ce site — ignoré.", label)
@@ -198,41 +143,6 @@ def _merge_external_signal(
     merged[cols] = merged[cols].fillna(0)
     logger.info("Signal %-15s fusionné : %d colonnes ajoutées", label, len(cols))
     return merged
-
-
-def add_air_quality_signal(df: pd.DataFrame, hospital: str) -> pd.DataFrame:
-    """Fusionne les variables qualité de l'air (préfixe `air_*`)."""
-    return _merge_external_signal(
-        df,
-        path=RAW_DIR / f"air_quality_{hospital}.csv",
-        column_prefix="air_",
-        label="AirQuality",
-    )
-
-
-def add_earthquake_signal(df: pd.DataFrame, hospital: str) -> pd.DataFrame:
-    """Fusionne les indicateurs sismiques USGS (préfixe `eq_*`)."""
-    return _merge_external_signal(
-        df,
-        path=RAW_DIR / f"usgs_earthquake_{hospital}.csv",
-        column_prefix="eq_",
-        label="USGS",
-    )
-
-
-def add_gdacs_signal(df: pd.DataFrame, hospital: str) -> pd.DataFrame:
-    """Fusionne les alertes GDACS (préfixe `gdacs_*`).
-
-    Reflète les catastrophes naturelles déclarées (inondations, cyclones,
-    feux, sécheresses…) qui peuvent stresser indirectement la consommation
-    de l'hôpital (afflux de patients, dégradation du réseau électrique).
-    """
-    return _merge_external_signal(
-        df,
-        path=RAW_DIR / f"gdacs_{hospital}.csv",
-        column_prefix="gdacs_",
-        label="GDACS",
-    )
 
 
 def add_electricitymaps_signal(df: pd.DataFrame, hospital: str) -> pd.DataFrame:
@@ -305,11 +215,6 @@ def enrich_one_hospital(base_df: pd.DataFrame, hospital: str) -> pd.DataFrame:
     else:
         logger.info("Pas de météo pour %s — ignoré.", hospital)
 
-    out = add_gdelt_signal(out, hospital=hospital)
-    out = add_noaa_storm_signal(out, hospital=hospital)
-    out = add_air_quality_signal(out, hospital=hospital)
-    out = add_earthquake_signal(out, hospital=hospital)
-    out = add_gdacs_signal(out, hospital=hospital)
     out = add_electricitymaps_signal(out, hospital=hospital)
 
     out["hour"] = out["datetime"].dt.hour

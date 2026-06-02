@@ -2,17 +2,16 @@
 Script principal : exécute le pipeline complet de bout en bout.
 
 Étapes :
-  1. Ingestion des données réelles (Lacor, ERIC NHS, NYC LL84, météo,
-     air quality, USGS, GDACS, GDELT, NOAA Storm, Electricity Maps,
-     prévisions Open-Meteo)
-  2. Preprocessing (rééchantillonnage, nettoyage, fusion)
+  1. Ingestion (Lacor, ERIC NHS, NYC LL84, météo archive + prévisions, Electricity Maps)
+  2. Preprocessing (rééchantillonnage, fusion multi-hôpitaux)
   3. Feature engineering
-  4. Entraînement du modèle baseline (Random Forest / XGBoost / LightGBM)
+  4. Entraînement nowcast (RF / XGBoost / LightGBM + SHAP)
+  5. Entraînement horizons 1/3/6 h (mêmes features, cible coupure future)
 """
 
 import logging
 import sys
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta
 import argparse
 from time import perf_counter
 
@@ -88,64 +87,6 @@ def main(
     except Exception as e:
         logger.warning("  ⚠ Ingestion NYC LL84 échouée : %s", e)
 
-    logger.info("  → Ingestion signal événementiel GDELT…")
-    try:
-        from src.data.ingest_gdelt import run as ingest_gdelt
-        year = datetime.now().year if mode == "live" else 2022
-        _run_timed("Ingestion GDELT", ingest_gdelt, year=year)
-    except Exception as e:
-        logger.warning("  ⚠ Ingestion GDELT échouée : %s", e)
-
-    logger.info("  → Ingestion NOAA Storm Events (Phoenix)…")
-    try:
-        from src.data.ingest_noaa_storm import run as ingest_noaa
-        year = datetime.now().year if mode == "live" else 2022
-        _run_timed("Ingestion NOAA", ingest_noaa, year=year)
-    except Exception as e:
-        logger.warning("  ⚠ Ingestion NOAA échouée : %s", e)
-
-    logger.info("  → Ingestion qualité de l'air (Open-Meteo Air Quality)…")
-    try:
-        from src.data.ingest_air_quality import run as ingest_air
-        if mode == "live":
-            end_d = date.today()
-            start_d = end_d - timedelta(days=window_days)
-            _run_timed(
-                "Ingestion Air Quality",
-                ingest_air,
-                year=None,
-                start_date=start_d.isoformat(),
-                end_date=end_d.isoformat(),
-            )
-        else:
-            _run_timed("Ingestion Air Quality", ingest_air, year=2022)
-    except Exception as e:
-        logger.warning("  ⚠ Ingestion Air Quality échouée : %s", e)
-
-    logger.info("  → Ingestion sismique (USGS Earthquake Catalog)…")
-    try:
-        from src.data.ingest_usgs_earthquake import run as ingest_usgs
-        if mode == "live":
-            end_dt = datetime.now(timezone.utc)
-            start_dt = end_dt - timedelta(days=window_days)
-            _run_timed("Ingestion USGS", ingest_usgs, year=None, start=start_dt, end=end_dt)
-        else:
-            _run_timed("Ingestion USGS", ingest_usgs, year=2022)
-    except Exception as e:
-        logger.warning("  ⚠ Ingestion USGS échouée : %s", e)
-
-    logger.info("  → Ingestion catastrophes naturelles (GDACS)…")
-    try:
-        from src.data.ingest_gdacs import run as ingest_gdacs
-        if mode == "live":
-            end_dt = datetime.now(timezone.utc)
-            start_dt = end_dt - timedelta(days=window_days)
-            _run_timed("Ingestion GDACS", ingest_gdacs, year=None, start=start_dt, end=end_dt)
-        else:
-            _run_timed("Ingestion GDACS", ingest_gdacs, year=2022)
-    except Exception as e:
-        logger.warning("  ⚠ Ingestion GDACS échouée : %s", e)
-
     logger.info("  → Ingestion prévisions météo (Open-Meteo Forecast)…")
     try:
         from src.data.ingest_openmeteo_forecast import run as ingest_forecast
@@ -189,6 +130,13 @@ def main(
         scope=scope,
         calibration_method=calibration_method,
     )
+
+    logger.info("\n▶ ÉTAPE 5 : Modèles horizons (coupure dans 1 / 3 / 6 h)")
+    from src.models.train_horizons import run as train_horizons
+    try:
+        _run_timed("Horizons 1/3/6 h", train_horizons, scope=scope, fast_mode=fast_mode)
+    except Exception as e:
+        logger.warning("  ⚠ Entraînement horizons échoué : %s", e)
 
     logger.info("\n" + "=" * 60)
     logger.info("  PIPELINE TERMINÉ AVEC SUCCÈS")
