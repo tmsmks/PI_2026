@@ -77,7 +77,6 @@ ALL_HOSPITAL_KEYS = list(HOSPITAL_DISPLAY.keys())
 from src.nowcast_horizons import predict_horizons
 from src.ui_content import (
     DATA_SOURCES,
-    REMOVED_DATA_SOURCES_NOTE,
     source_role_context_app,
     source_role_model_pipeline,
     FEATURE_CATEGORIES,
@@ -408,8 +407,6 @@ def show_data_sources_panel() -> None:
     for i, src in enumerate(context_sources):
         with cols2[i % 2]:
             st.markdown(_source_card_html(src), unsafe_allow_html=True)
-
-    st.caption(REMOVED_DATA_SOURCES_NOTE)
 
 
 def compute_shap_local(explainer, row_df: pd.DataFrame, feature_cols: list[str]):

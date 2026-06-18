@@ -156,13 +156,6 @@ DATA_SOURCES = [
      "desc": "Délestage programmé Cape Town — contexte uniquement (non testable sur Lacor)"},
 ]
 
-# Signaux retirés du projet (preuves conservées pour le rapport)
-REMOVED_DATA_SOURCES_NOTE = (
-    "Signaux **testés puis retirés** (n'amélioraient pas la prédiction sur Lacor) : "
-    "GDELT (médias), qualité de l'air, GDACS, USGS, NOAA Storm. "
-    "Voir `models/external_signal_experiment.json`."
-)
-
 def source_role_model_pipeline(src: dict) -> bool:
     return src.get("role") == "model_pipeline"
 
